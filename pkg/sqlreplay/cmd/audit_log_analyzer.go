@@ -298,7 +298,9 @@ func (a *auditLogAnalyzer) Analyze() (AuditLogAnalyzeResult, error) {
 		}
 
 		if !(a.cfg.OnlyAnalyzeConnDuringAnalyze && !connInfo.startDuringAnalyze) {
-			group.CommandAfterStartTime = append(group.CommandAfterStartTime, startTs.Sub(connInfo.connectionCreateTime))
+			if startTs.After(a.cfg.RealStart) && startTs.Before(a.cfg.RealEnd) {
+				group.CommandAfterStartTime = append(group.CommandAfterStartTime, startTs.Sub(connInfo.connectionCreateTime))
+			}
 		}
 		result[normalizedSQL] = group
 	}
