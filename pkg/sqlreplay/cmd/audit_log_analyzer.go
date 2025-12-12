@@ -67,6 +67,8 @@ type AnalyzeConfig struct {
 	Input                        string
 	Start                        time.Time
 	End                          time.Time
+	RealStart                    time.Time
+	RealEnd                      time.Time
 	DB                           string
 	FilterCommandWithRetry       bool
 	OnlyAnalyzeConnDuringAnalyze bool
@@ -280,7 +282,9 @@ func (a *auditLogAnalyzer) Analyze() (AuditLogAnalyzeResult, error) {
 		}
 		connInfo.lastCmd.StmtType = kvs[auditPluginKeyStmtType]
 		connInfo.lastCmd.kvs = kvs
-		connInfo.commandCount++
+		if startTs.After(a.cfg.RealStart) && startTs.Before(a.cfg.RealEnd) {
+			connInfo.commandCount++
+		}
 		a.connInfo[connID] = connInfo
 
 		group.ExecutionCount++

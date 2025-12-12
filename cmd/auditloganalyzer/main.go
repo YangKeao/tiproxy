@@ -43,6 +43,8 @@ func main() {
 	filterCommandWithRetry := rootCmd.PersistentFlags().Bool("filter-command-with-retry", false, "filter out commands that are retries according to the audit log.")
 	outputFormat := rootCmd.PersistentFlags().String("output-format", "csv", "the output format for analysis result. Currently only 'csv' and 'mysql' is supported.")
 	outputTableName := rootCmd.PersistentFlags().String("output-table-name", "audit_log_analysis", "the output table name when output format is 'mysql'.")
+	realStartTime := rootCmd.PersistentFlags().Time("real-start-time", time.Time{}, []string{time.RFC3339, time.RFC3339Nano}, "the real start time to analyze the audit log. Used to calculate the connection life time.")
+	realEndTime := rootCmd.PersistentFlags().Time("real-end-time", time.Time{}, []string{time.RFC3339, time.RFC3339Nano}, "the real end time to analyze the audit log. Used to calculate the connection life time.")
 
 	rootCmd.RunE = func(cmd *cobra.Command, _ []string) error {
 		logger, _, _, err := lg.BuildLogger(&config.Log{
@@ -59,9 +61,11 @@ func main() {
 			Input:                        *input,
 			Start:                        *startTime,
 			End:                          *endTime,
+			RealStart:                    *realStartTime,
+			RealEnd:                      *realEndTime,
 			DB:                           *db,
 			FilterCommandWithRetry:       *filterCommandWithRetry,
-			OnlyAnalyzeConnDuringAnalyze: false,
+			OnlyAnalyzeConnDuringAnalyze: true,
 		})
 		if err != nil {
 			return err
