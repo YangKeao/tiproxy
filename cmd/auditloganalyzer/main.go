@@ -23,6 +23,7 @@ import (
 const (
 	formatCSV   = "csv"
 	formatMySQL = "mysql"
+	formatConn  = "conn"
 )
 
 func main() {
@@ -55,11 +56,12 @@ func main() {
 		}
 
 		result, err := replay.Analyze(logger, replaycmd.AnalyzeConfig{
-			Input:                  *input,
-			Start:                  *startTime,
-			End:                    *endTime,
-			DB:                     *db,
-			FilterCommandWithRetry: *filterCommandWithRetry,
+			Input:                        *input,
+			Start:                        *startTime,
+			End:                          *endTime,
+			DB:                           *db,
+			FilterCommandWithRetry:       *filterCommandWithRetry,
+			OnlyAnalyzeConnDuringAnalyze: false,
 		})
 		if err != nil {
 			return err
@@ -72,6 +74,9 @@ func main() {
 		case formatMySQL:
 			logger.Info("writing analysis result to MySQL", zap.String("output", *output), zap.String("table", *outputTableName))
 			return writeAnalyzeResultToMySQL(result, *output, *outputTableName)
+		case formatConn:
+			logger.Info("writing analysis result to connection stdout")
+			return writeConnAnalyzeResultToFile(result, *output)
 		default:
 			return fmt.Errorf("unsupported output format: %s", *outputFormat)
 		}
@@ -134,6 +139,48 @@ func writeAnalyzeResultToMySQL(result replaycmd.AuditLogAnalyzeResult, outputPat
 
 	for sqlText, group := range result {
 		_, err = stmt.Exec(sqlText, group.ExecutionCount, group.TotalCostTime.Microseconds(), group.TotalAffectedRows, group.StmtTypes.String())
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func writeConnAnalyzeResultToFile(result replaycmd.AuditLogAnalyzeResult, outputPath string) error {
+	f, err := os.Create(outputPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	for class, group := range result {
+		if class == "META" {
+			continue
+		}
+		for _, cmdAfterStartTime := range group.CommandAfterStartTime {
+			line := fmt.Sprintf("%d\n",
+				cmdAfterStartTime.Microseconds(),
+			)
+			_, err := f.WriteString(line)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	metaGroup := result["META"]
+	metaFile, err := os.Create("meta.csv")
+	if err != nil {
+		return err
+	}
+	defer metaFile.Close()
+	for _, connLifeTime := range metaGroup.ConnectionLifeTime {
+		line := fmt.Sprintf("%d,%d\n",
+			connLifeTime.LifeTime.Microseconds(),
+			connLifeTime.CommandCount,
+		)
+		_, err := metaFile.WriteString(line)
 		if err != nil {
 			return err
 		}
