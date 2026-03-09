@@ -45,6 +45,7 @@ type Server struct {
 	certManager      *cert.CertManager
 	vipManager       vip.VIPManager
 	infoSyncer       *infosync.InfoSyncer
+	clusterFetcher   *infosync.MultiClusterFetcher
 	metricsReader    metricsreader.MetricsReader
 	replay           mgrrp.JobManager
 	meter            *meter.Meter
@@ -113,6 +114,12 @@ func NewServer(ctx context.Context, sctx *sctx.Context) (srv *Server, err error)
 		return
 	}
 
+	// setup backend-cluster fetcher
+	srv.clusterFetcher = infosync.NewMultiClusterFetcher(lg.Named("cluster_fetcher"), srv.certManager.ClusterTLS, srv.configManager, srv.configManager.WatchConfig())
+	if err = srv.clusterFetcher.Start(ctx); err != nil {
+		return
+	}
+
 	// general cluster HTTP client
 	{
 		srv.httpCli = http.NewHTTPClient(srv.certManager.ClusterTLS)
@@ -129,7 +136,7 @@ func NewServer(ctx context.Context, sctx *sctx.Context) (srv *Server, err error)
 	// setup metrics reader
 	{
 		healthCheckCfg := config.NewDefaultHealthCheckConfig()
-		srv.metricsReader = metricsreader.NewDefaultMetricsReader(lg.Named("mr"), srv.infoSyncer, srv.infoSyncer, srv.httpCli, srv.etcdCli, healthCheckCfg, srv.configManager)
+		srv.metricsReader = metricsreader.NewDefaultMetricsReader(lg.Named("mr"), srv.clusterFetcher, srv.clusterFetcher, srv.httpCli, srv.etcdCli, healthCheckCfg, srv.configManager)
 		if err = srv.metricsReader.Start(ctx); err != nil {
 			return
 		}
@@ -157,7 +164,7 @@ func NewServer(ctx context.Context, sctx *sctx.Context) (srv *Server, err error)
 			nscs = append(nscs, nsc)
 		}
 
-		err = srv.namespaceManager.Init(lg.Named("nsmgr"), nscs, srv.infoSyncer, srv.infoSyncer, srv.httpCli, srv.configManager, srv.metricsReader)
+		err = srv.namespaceManager.Init(lg.Named("nsmgr"), nscs, srv.clusterFetcher, srv.clusterFetcher, srv.httpCli, srv.configManager, srv.metricsReader)
 		if err != nil {
 			return
 		}
@@ -285,6 +292,9 @@ func (s *Server) Close() error {
 	}
 	if s.infoSyncer != nil {
 		errs = append(errs, s.infoSyncer.Close())
+	}
+	if s.clusterFetcher != nil {
+		errs = append(errs, s.clusterFetcher.Close())
 	}
 	if s.configManager != nil {
 		errs = append(errs, s.configManager.Close())

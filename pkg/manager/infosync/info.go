@@ -253,12 +253,19 @@ func (is *InfoSyncer) removeTopology(ctx context.Context) error {
 }
 
 func (is *InfoSyncer) GetTiDBTopology(ctx context.Context) (map[string]*TiDBTopologyInfo, error) {
+	return getTiDBTopology(ctx, is.lg, is.etcdCli)
+}
+
+func getTiDBTopology(ctx context.Context, lg *zap.Logger, etcdCli *clientv3.Client) (map[string]*TiDBTopologyInfo, error) {
+	if etcdCli == nil {
+		return map[string]*TiDBTopologyInfo{}, nil
+	}
 	// etcdCli.Get will retry infinitely internally.
-	resNoKeyspace, err := is.etcdCli.Get(ctx, tidbTopologyInformationPath, clientv3.WithPrefix())
+	resNoKeyspace, err := etcdCli.Get(ctx, tidbTopologyInformationPath, clientv3.WithPrefix())
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
-	resWithKeyspace, err := is.etcdCli.Get(ctx, tidbKeyspaceTopologyInformationPath, clientv3.WithPrefix())
+	resWithKeyspace, err := etcdCli.Get(ctx, tidbKeyspaceTopologyInformationPath, clientv3.WithPrefix())
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
@@ -291,7 +298,7 @@ func (is *InfoSyncer) GetTiDBTopology(ctx context.Context) (map[string]*TiDBTopo
 			var topology *TiDBTopologyInfo
 			addr := key[:len(key)-len(infoSuffix)-1]
 			if err = json.Unmarshal(kv.Value, &topology); err != nil {
-				is.lg.Error("unmarshal topology info failed", zap.String("key", key),
+				lg.Error("unmarshal topology info failed", zap.String("key", key),
 					zap.String("value", hack.String(kv.Value)), zap.Error(err))
 			} else {
 				infos[addr] = topology
@@ -310,8 +317,15 @@ func (is *InfoSyncer) GetTiDBTopology(ctx context.Context) (map[string]*TiDBTopo
 }
 
 func (is *InfoSyncer) GetPromInfo(ctx context.Context) (*PrometheusInfo, error) {
+	return getPromInfo(ctx, is.etcdCli, is.syncConfig)
+}
+
+func getPromInfo(ctx context.Context, etcdCli *clientv3.Client, syncConfig syncConfig) (*PrometheusInfo, error) {
+	if etcdCli == nil {
+		return nil, ErrNoProm
+	}
 	opts := []clientv3.OpOption{clientv3.WithPrefix()}
-	kvs, err := etcd.GetKVs(ctx, is.etcdCli, promTopologyPath, opts, is.syncConfig.getPromTimeout, is.syncConfig.getPromRetryIntvl, is.syncConfig.getPromRetryCnt)
+	kvs, err := etcd.GetKVs(ctx, etcdCli, promTopologyPath, opts, syncConfig.getPromTimeout, syncConfig.getPromRetryIntvl, syncConfig.getPromRetryCnt)
 	if err != nil {
 		return nil, err
 	}

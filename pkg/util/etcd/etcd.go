@@ -5,6 +5,7 @@ package etcd
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net/url"
 	"strings"
@@ -26,16 +27,22 @@ import (
 
 // InitEtcdClient initializes an etcd client that connects to PD ETCD server.
 func InitEtcdClient(logger *zap.Logger, cfg *config.Config, certMgr *cert.CertManager) (*clientv3.Client, error) {
-	pdAddr := cfg.Proxy.PDAddrs
-	if len(pdAddr) == 0 {
+	return InitEtcdClientWithAddrs(logger, cfg.Proxy.PDAddrs, certMgr.ClusterTLS())
+}
+
+func InitEtcdClientWithAddrs(logger *zap.Logger, pdAddrs string, tlsConfig *tls.Config) (*clientv3.Client, error) {
+	if len(strings.TrimSpace(pdAddrs)) == 0 {
 		// use tidb server addresses directly
 		return nil, nil
 	}
-	pdEndpoints := strings.Split(pdAddr, ",")
+	pdEndpoints := strings.Split(pdAddrs, ",")
+	for i := range pdEndpoints {
+		pdEndpoints[i] = strings.TrimSpace(pdEndpoints[i])
+	}
 	logger.Info("connect ETCD servers", zap.Strings("addrs", pdEndpoints))
 	etcdClient, err := clientv3.New(clientv3.Config{
 		Endpoints:        pdEndpoints,
-		TLS:              certMgr.ClusterTLS(),
+		TLS:              tlsConfig,
 		Logger:           logger.Named("etcdcli"),
 		AutoSyncInterval: 30 * time.Second,
 		DialTimeout:      5 * time.Second,

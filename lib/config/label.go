@@ -9,6 +9,7 @@ const (
 	LocationLabelName = "zone"
 	KeyspaceLabelName = "keyspace"
 	CidrLabelName     = "cidr"
+	ClusterLabelName  = "tiproxy-cluster"
 )
 
 func (cfg *Config) GetLocation() string {
