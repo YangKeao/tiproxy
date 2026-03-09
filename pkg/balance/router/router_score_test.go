@@ -1109,3 +1109,53 @@ func TestGroupBackends(t *testing.T) {
 		}, 3*time.Second, 10*time.Millisecond, "test %d", i)
 	}
 }
+
+func TestRouteByPort(t *testing.T) {
+	lg, _ := logger.CreateLoggerForTest(t)
+	rt := NewScoreBasedRouter(lg)
+	cfgCh := make(chan *config.Config)
+	cfg := &config.Config{
+		Balance: config.Balance{
+			RoutingRule: config.MatchPortStr,
+		},
+	}
+	cfgGetter := newMockConfigGetter(cfg)
+	p := &mockBalancePolicy{
+		backendToRoute: func(backends []policy.BackendCtx) policy.BackendCtx {
+			if len(backends) == 0 {
+				return nil
+			}
+			return backends[0]
+		},
+	}
+	bpCreator := func(_ *zap.Logger) policy.BalancePolicy {
+		p.Init(cfg)
+		return p
+	}
+	bo := newMockBackendObserver()
+	rt.Init(context.Background(), bo, bpCreator, cfgGetter, cfgCh)
+	t.Cleanup(bo.Close)
+	t.Cleanup(rt.Close)
+
+	bo.addBackend("a", map[string]string{config.TiProxyPortLabelName: "10000"})
+	bo.addBackend("b", map[string]string{config.TiProxyPortLabelName: "10000"})
+	bo.addBackend("c", map[string]string{config.TiProxyPortLabelName: "10001"})
+	bo.notify(nil)
+	require.Eventually(t, func() bool {
+		rt.Lock()
+		defer rt.Unlock()
+		return len(rt.groups) == 2
+	}, 3*time.Second, 10*time.Millisecond)
+
+	for i := 0; i < 10; i++ {
+		selector := rt.GetBackendSelector(ClientInfo{ProxyPort: "10000"})
+		backend, err := selector.Next()
+		require.NoError(t, err)
+		require.Contains(t, []string{"a", "b"}, backend.Addr())
+		selector.Finish(newMockRedirectableConn(t, uint64(i+1)), true)
+	}
+
+	selector := rt.GetBackendSelector(ClientInfo{ProxyPort: "10002"})
+	_, err := selector.Next()
+	require.ErrorIs(t, err, ErrNoBackend)
+}

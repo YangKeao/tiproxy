@@ -8,6 +8,8 @@ import (
 	"net"
 	"reflect"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,6 +32,8 @@ const (
 	MatchClientCIDR
 	// Match connections based on proxy CIDR. If proxy-protocol is disabled, route by the client CIDR.
 	MatchProxyCIDR
+	// Match connections based on proxy listening port.
+	MatchPort
 )
 
 var _ ConnEventReceiver = (*Group)(nil)
@@ -44,6 +48,8 @@ type Group struct {
 	values []string
 	// parsed CIDR list for faster match
 	cidrList []*net.IPNet
+	// normalized proxy port for MatchPort
+	port     string
 	backends map[string]*backendWrapper
 	// To limit the speed of redirection.
 	lastRedirectTime time.Time
@@ -77,6 +83,17 @@ func (g *Group) parseValues() error {
 			return parseErr
 		}
 		g.cidrList = cidrList
+	case MatchPort:
+		if len(g.values) != 1 {
+			return errors.New("port group requires exactly one value")
+		}
+		port := strings.TrimSpace(g.values[0])
+		portNum, err := strconv.Atoi(port)
+		if err != nil || portNum < 1 || portNum > 65535 {
+			return errors.Errorf("invalid proxy port %s", port)
+		}
+		g.port = strconv.Itoa(portNum)
+		g.values = []string{g.port}
 	}
 	return nil
 }
@@ -98,6 +115,8 @@ func (g *Group) Match(clientInfo ClientInfo) bool {
 			g.lg.Error("checking CIDR failed", zap.Stringer("addr", addr), zap.Error(err))
 		}
 		return contains
+	case MatchPort:
+		return clientInfo.ProxyPort == g.port
 	}
 	return true
 }
@@ -114,6 +133,11 @@ func (g *Group) EqualValues(values []string) bool {
 			}
 		}
 		return true
+	case MatchPort:
+		if len(values) != 1 {
+			return false
+		}
+		return strings.TrimSpace(values[0]) == g.port
 	}
 	return false
 }
@@ -130,6 +154,11 @@ func (g *Group) Intersect(values []string) bool {
 			}
 		}
 		return false
+	case MatchPort:
+		if len(values) != 1 {
+			return false
+		}
+		return strings.TrimSpace(values[0]) == g.port
 	}
 	return false
 }

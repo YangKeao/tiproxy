@@ -8,6 +8,7 @@ import "net"
 type ClientInfo struct {
 	ClientAddr net.Addr
 	ProxyAddr  net.Addr
+	ProxyPort  string
 	// TODO: username, database, etc.
 }
 

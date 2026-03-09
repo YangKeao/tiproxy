@@ -46,6 +46,10 @@ func TestCheckBalance(t *testing.T) {
 
 	balance := Balance{}
 	require.NoError(t, (&balance).Check())
+
+	balance = Balance{RoutingRule: MatchPortStr}
+	require.NoError(t, (&balance).Check())
+
 	balance = DefaultBalance()
 	require.NoError(t, (&balance).Check())
 }

@@ -109,6 +109,61 @@ func TestMatchIP(t *testing.T) {
 	}
 }
 
+func TestParsePort(t *testing.T) {
+	tests := []struct {
+		values  []string
+		success bool
+		port    string
+	}{
+		{
+			values:  []string{"10000"},
+			success: true,
+			port:    "10000",
+		},
+		{
+			values:  []string{" 10000 "},
+			success: true,
+			port:    "10000",
+		},
+		{
+			values:  []string{"0"},
+			success: false,
+		},
+		{
+			values:  []string{"70000"},
+			success: false,
+		},
+		{
+			values:  []string{"abc"},
+			success: false,
+		},
+		{
+			values:  []string{"10000", "10001"},
+			success: false,
+		},
+	}
+
+	lg, _ := logger.CreateLoggerForTest(t)
+	for _, test := range tests {
+		g, err := NewGroup(test.values, nopBpCreator, MatchPort, lg)
+		if test.success {
+			require.NoError(t, err)
+			require.Equal(t, []string{test.port}, g.values)
+		} else {
+			require.Error(t, err)
+		}
+	}
+}
+
+func TestMatchPort(t *testing.T) {
+	lg, _ := logger.CreateLoggerForTest(t)
+	g, err := NewGroup([]string{"10000"}, nopBpCreator, MatchPort, lg)
+	require.NoError(t, err)
+	require.True(t, g.Match(ClientInfo{ProxyPort: "10000"}))
+	require.False(t, g.Match(ClientInfo{ProxyPort: "10001"}))
+	require.False(t, g.Match(ClientInfo{}))
+}
+
 func TestRefreshCidr(t *testing.T) {
 	tests := []struct {
 		cidrs1    []string

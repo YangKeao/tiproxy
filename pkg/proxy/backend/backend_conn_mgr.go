@@ -286,6 +286,12 @@ func (mgr *BackendConnManager) getBackendIO(ctx context.Context, cctx ConnContex
 	if mgr.clientIO != nil {
 		ci.ClientAddr = mgr.clientIO.RemoteAddr()
 		ci.ProxyAddr = mgr.clientIO.ProxyAddr()
+		if localAddr := mgr.clientIO.LocalAddr(); localAddr != nil {
+			_, ci.ProxyPort, _ = net.SplitHostPort(localAddr.String())
+		}
+	}
+	if connAddr, ok := mgr.Value(ConnContextKeyConnAddr).(string); ok && connAddr != "" {
+		_, ci.ProxyPort, _ = net.SplitHostPort(connAddr)
 	}
 	selector := r.GetBackendSelector(ci)
 	startTime := time.Now()
