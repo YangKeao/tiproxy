@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -66,10 +67,17 @@ type ProxyServerOnline struct {
 }
 
 type ProxyServer struct {
-	Addr              string `yaml:"addr,omitempty" toml:"addr,omitempty" json:"addr,omitempty" reloadable:"false"`
-	AdvertiseAddr     string `yaml:"advertise-addr,omitempty" toml:"advertise-addr,omitempty" json:"advertise-addr,omitempty" reloadable:"false"`
-	PDAddrs           string `yaml:"pd-addrs,omitempty" toml:"pd-addrs,omitempty" json:"pd-addrs,omitempty" reloadable:"false"`
+	Addr              string           `yaml:"addr,omitempty" toml:"addr,omitempty" json:"addr,omitempty" reloadable:"false"`
+	AdvertiseAddr     string           `yaml:"advertise-addr,omitempty" toml:"advertise-addr,omitempty" json:"advertise-addr,omitempty" reloadable:"false"`
+	PDAddrs           string           `yaml:"pd-addrs,omitempty" toml:"pd-addrs,omitempty" json:"pd-addrs,omitempty" reloadable:"false"`
+	BackendClusters   []BackendCluster `yaml:"backend-clusters,omitempty" toml:"backend-clusters,omitempty" json:"backend-clusters,omitempty" reloadable:"true"`
 	ProxyServerOnline `yaml:",inline" toml:",inline" json:",inline"`
+}
+
+type BackendCluster struct {
+	Name      string `yaml:"name,omitempty" toml:"name,omitempty" json:"name,omitempty" reloadable:"true"`
+	PDAddrs   string `yaml:"pd-addrs,omitempty" toml:"pd-addrs,omitempty" json:"pd-addrs,omitempty" reloadable:"true"`
+	NSServers string `yaml:"ns-servers,omitempty" toml:"ns-servers,omitempty" json:"ns-servers,omitempty" reloadable:"true"`
 }
 
 type API struct {
@@ -146,6 +154,8 @@ func NewConfig() *Config {
 func (cfg *Config) Clone() *Config {
 	newCfg := *cfg
 	newCfg.Labels = maps.Clone(cfg.Labels)
+	newCfg.Proxy.PublicEndpoints = slices.Clone(cfg.Proxy.PublicEndpoints)
+	newCfg.Proxy.BackendClusters = slices.Clone(cfg.Proxy.BackendClusters)
 	return &newCfg
 }
 
@@ -167,6 +177,9 @@ func (cfg *Config) Check() error {
 
 	if cfg.Proxy.ConnBufferSize > 0 && (cfg.Proxy.ConnBufferSize > 16*1024*1024 || cfg.Proxy.ConnBufferSize < 1024) {
 		return errors.Wrapf(ErrInvalidConfigValue, "conn-buffer-size must be between 1K and 16M")
+	}
+	if err := cfg.Proxy.Check(); err != nil {
+		return err
 	}
 
 	if err := cfg.Balance.Check(); err != nil {
@@ -216,4 +229,67 @@ func (cfg *Config) GetIPPort() (ip, port, statusPort string, err error) {
 		}
 	}
 	return
+}
+
+// GetBackendClusters returns configured backend clusters.
+// It keeps backward compatibility for the legacy `proxy.pd-addrs` setting.
+func (cfg *Config) GetBackendClusters() []BackendCluster {
+	if len(cfg.Proxy.BackendClusters) > 0 {
+		return slices.Clone(cfg.Proxy.BackendClusters)
+	}
+	if strings.TrimSpace(cfg.Proxy.PDAddrs) == "" {
+		return nil
+	}
+	return []BackendCluster{
+		{
+			Name:    "default",
+			PDAddrs: cfg.Proxy.PDAddrs,
+		},
+	}
+}
+
+func (ps *ProxyServer) Check() error {
+	if len(ps.BackendClusters) == 0 {
+		return nil
+	}
+	clusterNames := make(map[string]struct{}, len(ps.BackendClusters))
+	for i, cluster := range ps.BackendClusters {
+		name := strings.TrimSpace(cluster.Name)
+		if name == "" {
+			return errors.Wrapf(ErrInvalidConfigValue, "proxy.backend-clusters[%d].name is empty", i)
+		}
+		if _, ok := clusterNames[name]; ok {
+			return errors.Wrapf(ErrInvalidConfigValue, "duplicate proxy.backend-clusters name %s", name)
+		}
+		clusterNames[name] = struct{}{}
+		if err := validateAddrList(cluster.PDAddrs, "proxy.backend-clusters.pd-addrs"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func splitAddrList(addrs string) []string {
+	parts := strings.Split(addrs, ",")
+	trimmed := make([]string, 0, len(parts))
+	for _, part := range parts {
+		addr := strings.TrimSpace(part)
+		if addr != "" {
+			trimmed = append(trimmed, addr)
+		}
+	}
+	return trimmed
+}
+
+func validateAddrList(addrs, field string) error {
+	parts := splitAddrList(addrs)
+	if len(parts) == 0 {
+		return errors.Wrapf(ErrInvalidConfigValue, "%s is empty", field)
+	}
+	for _, addr := range parts {
+		if _, _, err := net.SplitHostPort(addr); err != nil {
+			return errors.Wrapf(ErrInvalidConfigValue, "invalid %s address %s", field, addr)
+		}
+	}
+	return nil
 }

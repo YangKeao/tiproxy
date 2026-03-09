@@ -62,6 +62,54 @@ func TestConfig(t *testing.T) {
 		require.NotEqual(t, sum, string(sumreg.Find(all)))
 		require.Equal(t, http.StatusOK, r.StatusCode)
 	})
+
+	doHTTP(t, http.MethodPut, "/api/admin/config", httpOpts{reader: strings.NewReader(`
+[[proxy.backend-clusters]]
+name = "cluster-a"
+pd-addrs = "127.0.0.1:2379"
+ns-servers = "10.0.0.1"
+
+[[proxy.backend-clusters]]
+name = "cluster-b"
+pd-addrs = "127.0.0.2:2379"
+ns-servers = "10.0.0.2,10.0.0.3"
+`)}, func(t *testing.T, r *http.Response) {
+		require.Equal(t, http.StatusOK, r.StatusCode)
+	})
+
+	doHTTP(t, http.MethodGet, "/api/admin/config?format=json", httpOpts{}, func(t *testing.T, r *http.Response) {
+		var cfg config.Config
+		all, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal(all, &cfg))
+		require.Len(t, cfg.Proxy.BackendClusters, 2)
+		require.Equal(t, "cluster-a", cfg.Proxy.BackendClusters[0].Name)
+		require.Equal(t, "127.0.0.1:2379", cfg.Proxy.BackendClusters[0].PDAddrs)
+		require.Equal(t, "10.0.0.1", cfg.Proxy.BackendClusters[0].NSServers)
+		require.Equal(t, "cluster-b", cfg.Proxy.BackendClusters[1].Name)
+		require.Equal(t, "127.0.0.2:2379", cfg.Proxy.BackendClusters[1].PDAddrs)
+		require.Equal(t, "10.0.0.2,10.0.0.3", cfg.Proxy.BackendClusters[1].NSServers)
+		require.Equal(t, http.StatusOK, r.StatusCode)
+	})
+
+	doHTTP(t, http.MethodPut, "/api/admin/config", httpOpts{reader: strings.NewReader(`
+[[proxy.backend-clusters]]
+name = "cluster-c"
+pd-addrs = "127.0.0.3:2379"
+`)}, func(t *testing.T, r *http.Response) {
+		require.Equal(t, http.StatusOK, r.StatusCode)
+	})
+
+	doHTTP(t, http.MethodGet, "/api/admin/config?format=json", httpOpts{}, func(t *testing.T, r *http.Response) {
+		var cfg config.Config
+		all, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal(all, &cfg))
+		require.Len(t, cfg.Proxy.BackendClusters, 1)
+		require.Equal(t, "cluster-c", cfg.Proxy.BackendClusters[0].Name)
+		require.Equal(t, "127.0.0.3:2379", cfg.Proxy.BackendClusters[0].PDAddrs)
+		require.Equal(t, http.StatusOK, r.StatusCode)
+	})
 }
 
 func TestAcceptType(t *testing.T) {
