@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -70,6 +71,7 @@ type ProxyServer struct {
 	Addr              string           `yaml:"addr,omitempty" toml:"addr,omitempty" json:"addr,omitempty" reloadable:"false"`
 	AdvertiseAddr     string           `yaml:"advertise-addr,omitempty" toml:"advertise-addr,omitempty" json:"advertise-addr,omitempty" reloadable:"false"`
 	PDAddrs           string           `yaml:"pd-addrs,omitempty" toml:"pd-addrs,omitempty" json:"pd-addrs,omitempty" reloadable:"false"`
+	PortRange         []int            `yaml:"port-range,omitempty" toml:"port-range,omitempty" json:"port-range,omitempty" reloadable:"false"`
 	BackendClusters   []BackendCluster `yaml:"backend-clusters,omitempty" toml:"backend-clusters,omitempty" json:"backend-clusters,omitempty" reloadable:"true"`
 	ProxyServerOnline `yaml:",inline" toml:",inline" json:",inline"`
 }
@@ -196,7 +198,11 @@ func (cfg *Config) ToBytes() ([]byte, error) {
 }
 
 func (cfg *Config) GetIPPort() (ip, port, statusPort string, err error) {
-	addrs := strings.Split(cfg.Proxy.Addr, ",")
+	addrs, err := cfg.Proxy.GetSQLAddrs()
+	if err != nil {
+		err = errors.WithStack(err)
+		return
+	}
 	ip, port, err = net.SplitHostPort(addrs[0])
 	if err != nil {
 		err = errors.WithStack(err)
@@ -249,6 +255,9 @@ func (cfg *Config) GetBackendClusters() []BackendCluster {
 }
 
 func (ps *ProxyServer) Check() error {
+	if _, err := ps.GetSQLAddrs(); err != nil {
+		return errors.Wrapf(ErrInvalidConfigValue, "invalid proxy.addr or proxy.port-range: %s", err.Error())
+	}
 	if len(ps.BackendClusters) == 0 {
 		return nil
 	}
@@ -292,4 +301,38 @@ func validateAddrList(addrs, field string) error {
 		}
 	}
 	return nil
+}
+
+func (ps *ProxyServer) GetSQLAddrs() ([]string, error) {
+	addrs := splitAddrList(ps.Addr)
+	if len(addrs) == 0 {
+		// Keep historical behavior for tests and compatibility:
+		// net.Listen("tcp", "") lets the system pick an address.
+		if len(ps.PortRange) == 0 {
+			return []string{""}, nil
+		}
+		return nil, errors.New("proxy.addr is empty")
+	}
+	if len(ps.PortRange) == 0 {
+		return addrs, nil
+	}
+	if len(ps.PortRange) != 2 {
+		return nil, errors.New("proxy.port-range must contain exactly two ports")
+	}
+	start, end := ps.PortRange[0], ps.PortRange[1]
+	if start < 1 || start > 65535 || end < 1 || end > 65535 || start > end {
+		return nil, errors.New("proxy.port-range is invalid")
+	}
+	if len(addrs) != 1 {
+		return nil, errors.New("proxy.addr must contain exactly one host when proxy.port-range is set")
+	}
+	host, _, err := net.SplitHostPort(addrs[0])
+	if err != nil {
+		return nil, err
+	}
+	rangeAddrs := make([]string, 0, end-start+1)
+	for port := start; port <= end; port++ {
+		rangeAddrs = append(rangeAddrs, net.JoinHostPort(host, strconv.Itoa(port)))
+	}
+	return rangeAddrs, nil
 }

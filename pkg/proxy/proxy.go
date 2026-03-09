@@ -7,7 +7,6 @@ import (
 	"context"
 	"net"
 	"reflect"
-	"strings"
 	"sync"
 	"time"
 
@@ -74,7 +73,10 @@ func NewSQLServer(logger *zap.Logger, cfg *config.Config, certMgr *cert.CertMana
 
 	s.reset(cfg)
 
-	s.addrs = strings.Split(cfg.Proxy.Addr, ",")
+	s.addrs, err = cfg.Proxy.GetSQLAddrs()
+	if err != nil {
+		return nil, err
+	}
 	s.listeners = make([]net.Listener, len(s.addrs))
 	for i, addr := range s.addrs {
 		s.listeners[i], err = net.Listen("tcp", addr)

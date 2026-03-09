@@ -126,6 +126,25 @@ func TestProxyCheck(t *testing.T) {
 		},
 		{
 			pre: func(t *testing.T, c *Config) {
+				c.Proxy.PortRange = []int{10000}
+			},
+			err: ErrInvalidConfigValue,
+		},
+		{
+			pre: func(t *testing.T, c *Config) {
+				c.Proxy.PortRange = []int{10000, 9999}
+			},
+			err: ErrInvalidConfigValue,
+		},
+		{
+			pre: func(t *testing.T, c *Config) {
+				c.Proxy.Addr = "0.0.0.0:6000,0.0.0.0:6001"
+				c.Proxy.PortRange = []int{10000, 10001}
+			},
+			err: ErrInvalidConfigValue,
+		},
+		{
+			pre: func(t *testing.T, c *Config) {
 				c.Proxy.BackendClusters = append(c.Proxy.BackendClusters, BackendCluster{})
 			},
 			err: ErrInvalidConfigValue,
@@ -209,6 +228,20 @@ func TestGetIPPort(t *testing.T) {
 		require.Equal(t, cas.port, port)
 		require.Equal(t, cas.port, statusPort)
 	}
+}
+
+func TestGetSQLAddrs(t *testing.T) {
+	cfg := NewConfig()
+	cfg.Proxy.Addr = "0.0.0.0:6000"
+	cfg.Proxy.PortRange = nil
+	addrs, err := cfg.Proxy.GetSQLAddrs()
+	require.NoError(t, err)
+	require.Equal(t, []string{"0.0.0.0:6000"}, addrs)
+
+	cfg.Proxy.PortRange = []int{10000, 10002}
+	addrs, err = cfg.Proxy.GetSQLAddrs()
+	require.NoError(t, err)
+	require.Equal(t, []string{"0.0.0.0:10000", "0.0.0.0:10001", "0.0.0.0:10002"}, addrs)
 }
 
 func TestCloneConfig(t *testing.T) {

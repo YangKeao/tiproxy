@@ -219,6 +219,33 @@ func TestMultiAddr(t *testing.T) {
 	certManager.Close()
 }
 
+func TestPortRange(t *testing.T) {
+	lg, _ := logger.CreateLoggerForTest(t)
+	certManager := cert.NewCertManager()
+	err := certManager.Init(&config.Config{}, lg, nil)
+	require.NoError(t, err)
+	server, err := NewSQLServer(lg, &config.Config{
+		Proxy: config.ProxyServer{
+			Addr:      "127.0.0.1:6000",
+			PortRange: []int{10000, 10002},
+		},
+	}, certManager, id.NewIDManager(), nil, nil, &mockHsHandler{})
+	require.NoError(t, err)
+	server.Run(context.Background(), nil)
+
+	require.Len(t, server.listeners, 3)
+	require.Equal(t, []string{"127.0.0.1:10000", "127.0.0.1:10001", "127.0.0.1:10002"}, server.addrs)
+	for _, listener := range server.listeners {
+		conn, err := net.Dial("tcp", listener.Addr().String())
+		require.NoError(t, err)
+		require.NoError(t, conn.Close())
+	}
+
+	server.PreClose()
+	require.NoError(t, server.Close())
+	certManager.Close()
+}
+
 func TestWatchCfg(t *testing.T) {
 	lg, _ := logger.CreateLoggerForTest(t)
 	hsHandler := backend.NewDefaultHandshakeHandler(nil)
