@@ -53,6 +53,12 @@ var (
 	errReadMetrics = errors.New("read backend metrics failed")
 )
 
+type backendAddr struct {
+	statusAddr string
+	label      string
+	cluster    string
+}
+
 type backendHistory struct {
 	Step1History []model.SamplePair
 	Step2History []model.SamplePair
@@ -287,23 +293,23 @@ func (br *BackendReader) readFromBackends(ctx context.Context, excludeZones []st
 
 	backendLabels := make([]string, 0, len(addrs))
 	for _, addr := range addrs {
-		backendLabels = append(backendLabels, getLabel4Addr(addr))
+		backendLabels = append(backendLabels, addr.label)
 	}
 	for i := range addrs {
-		func(addr, label string) {
+		func(addr backendAddr, label string) {
 			br.wgp.RunWithRecover(func() {
 				if ctx.Err() != nil {
 					return
 				}
-				resp, err := br.readBackendMetric(ctx, addr)
+				resp, err := br.readBackendMetric(ctx, addr.statusAddr, addr.cluster)
 				if err != nil {
-					br.lg.Debug("read metrics from backend failed", zap.String("addr", addr), zap.Error(err))
+					br.lg.Debug("read metrics from backend failed", zap.String("addr", addr.statusAddr), zap.String("cluster", addr.cluster), zap.Error(err))
 					return
 				}
 				text := filterMetrics(hack.String(resp), allNames)
 				mf, err := parseMetrics(text)
 				if err != nil {
-					br.lg.Warn("parse metrics failed", zap.String("addr", addr), zap.Error(err))
+					br.lg.Warn("parse metrics failed", zap.String("addr", addr.statusAddr), zap.String("cluster", addr.cluster), zap.Error(err))
 					return
 				}
 				br.metric2History(mf, label)
@@ -328,9 +334,9 @@ func (br *BackendReader) collectAllNames() []string {
 	return names
 }
 
-func (br *BackendReader) readBackendMetric(ctx context.Context, addr string) ([]byte, error) {
+func (br *BackendReader) readBackendMetric(ctx context.Context, addr, cluster string) ([]byte, error) {
 	b := backoff.WithContext(backoff.WithMaxRetries(backoff.NewConstantBackOff(br.cfg.RetryInterval), uint64(br.cfg.MaxRetries)), ctx)
-	return br.httpCli.Get(addr, backendMetricPath, b, br.cfg.DialTimeout)
+	return br.httpCli.GetWithCluster(addr, backendMetricPath, cluster, b, br.cfg.DialTimeout)
 }
 
 // metric2History appends the metrics to history for each rule of one backend.
@@ -539,21 +545,26 @@ func (br *BackendReader) marshalHistory(backends []string) error {
 	return nil
 }
 
-func (br *BackendReader) getBackendAddrs(ctx context.Context, excludeZones []string) ([]string, error) {
+func (br *BackendReader) getBackendAddrs(ctx context.Context, excludeZones []string) ([]backendAddr, error) {
 	backends, err := br.backendFetcher.GetTiDBTopology(ctx)
 	if err != nil {
 		br.lg.Error("failed to get backend addresses, stop reading metrics", zap.Error(err))
 		metrics.ServerErrCounter.WithLabelValues("backend_metrics").Inc()
 		return nil, err
 	}
-	addrs := make([]string, 0, len(backends))
+	addrs := make([]backendAddr, 0, len(backends))
 	for _, backend := range backends {
 		if len(excludeZones) > 0 {
 			if slices.Contains(excludeZones, backend.Labels[config.LocationLabelName]) {
 				continue
 			}
 		}
-		addrs = append(addrs, net.JoinHostPort(backend.IP, strconv.Itoa(int(backend.StatusPort))))
+		statusAddr := net.JoinHostPort(backend.IP, strconv.Itoa(int(backend.StatusPort)))
+		addrs = append(addrs, backendAddr{
+			statusAddr: statusAddr,
+			label:      getLabel4Addr(statusAddr),
+			cluster:    backend.Labels[config.ClusterLabelName],
+		})
 	}
 	return addrs, nil
 }

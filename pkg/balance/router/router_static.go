@@ -116,3 +116,7 @@ func (b *StaticBackend) Keyspace() string {
 func (b *StaticBackend) SetKeyspace(k string) {
 	b.keyspace = k
 }
+
+func (b *StaticBackend) Cluster() string {
+	return ""
+}

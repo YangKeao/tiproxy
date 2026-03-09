@@ -131,8 +131,12 @@ func TestGetBackendAddrs(t *testing.T) {
 			require.Error(t, err, "case %d", i)
 		} else {
 			require.NoError(t, err, "case %d", i)
-			slices.Sort(addrs)
-			require.Equal(t, test.expected, addrs, "case %d", i)
+			got := make([]string, 0, len(addrs))
+			for _, addr := range addrs {
+				got = append(got, addr.statusAddr)
+			}
+			slices.Sort(got)
+			require.Equal(t, test.expected, got, "case %d", i)
 		}
 	}
 }
@@ -245,7 +249,7 @@ func TestReadBackendMetric(t *testing.T) {
 			return test.resp
 		}
 		httpHandler.getRespBody.Store(&f)
-		res, err := br.readBackendMetric(context.Background(), addr)
+		res, err := br.readBackendMetric(context.Background(), addr, "")
 		if test.hasErr {
 			require.NotNil(t, err, "case %d", i)
 		} else {

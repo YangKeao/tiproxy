@@ -80,7 +80,7 @@ func (dhc *DefaultHealthCheck) Check(ctx context.Context, addr string, info *Bac
 	if !bh.Healthy {
 		return bh
 	}
-	dhc.checkSqlPort(ctx, addr, bh)
+	dhc.checkSqlPort(ctx, addr, info, bh)
 	if !bh.Healthy {
 		return bh
 	}
@@ -88,12 +88,13 @@ func (dhc *DefaultHealthCheck) Check(ctx context.Context, addr string, info *Bac
 	return bh
 }
 
-func (dhc *DefaultHealthCheck) checkSqlPort(ctx context.Context, addr string, bh *BackendHealth) {
+func (dhc *DefaultHealthCheck) checkSqlPort(ctx context.Context, addr string, info *BackendInfo, bh *BackendHealth) {
 	// Also dial the SQL port just in case that the SQL port hangs.
 	b := backoff.WithContext(backoff.WithMaxRetries(backoff.NewConstantBackOff(dhc.cfg.RetryInterval), uint64(dhc.cfg.MaxRetries)), ctx)
 	err := http.ConnectWithRetry(func() error {
 		startTime := time.Now()
-		conn, err := net.DialTimeout("tcp", addr, dhc.cfg.DialTimeout)
+		cluster := backendCluster(info)
+		conn, err := dhc.httpCli.DialContext(ctx, "tcp", addr, cluster, dhc.cfg.DialTimeout)
 		setPingBackendMetrics(addr, startTime)
 		if err != nil {
 			return err
@@ -127,8 +128,9 @@ func (dhc *DefaultHealthCheck) checkStatusPort(ctx context.Context, info *Backen
 	}
 
 	addr := net.JoinHostPort(info.IP, strconv.Itoa(int(info.StatusPort)))
+	cluster := backendCluster(info)
 	b := backoff.WithContext(backoff.WithMaxRetries(backoff.NewConstantBackOff(dhc.cfg.RetryInterval), uint64(dhc.cfg.MaxRetries)), ctx)
-	resp, err := dhc.httpCli.Get(addr, statusPathSuffix, b, dhc.cfg.DialTimeout)
+	resp, err := dhc.httpCli.GetWithCluster(addr, statusPathSuffix, cluster, b, dhc.cfg.DialTimeout)
 	if err == nil {
 		var respBody backendHttpStatusRespBody
 		err = json.Unmarshal(resp, &respBody)
@@ -162,6 +164,7 @@ func (dhc *DefaultHealthCheck) queryConfig(ctx context.Context, info *BackendInf
 
 	var err error
 	addr := net.JoinHostPort(info.IP, strconv.Itoa(int(info.StatusPort)))
+	cluster := backendCluster(info)
 	defer func() {
 		if lastBh == nil || lastBh.SupportRedirection != bh.SupportRedirection {
 			dhc.logger.Info("backend has updated signing cert", zap.String("addr", addr), zap.Bool("support_redirection", bh.SupportRedirection), zap.Error(err))
@@ -170,7 +173,7 @@ func (dhc *DefaultHealthCheck) queryConfig(ctx context.Context, info *BackendInf
 
 	b := backoff.WithContext(backoff.WithMaxRetries(backoff.NewConstantBackOff(dhc.cfg.RetryInterval), uint64(dhc.cfg.MaxRetries)), ctx)
 	var resp []byte
-	if resp, err = dhc.httpCli.Get(addr, configPathSuffix, b, dhc.cfg.DialTimeout); err != nil {
+	if resp, err = dhc.httpCli.GetWithCluster(addr, configPathSuffix, cluster, b, dhc.cfg.DialTimeout); err != nil {
 		return
 	}
 	var respBody backendHttpConfigRespBody
@@ -179,4 +182,11 @@ func (dhc *DefaultHealthCheck) queryConfig(ctx context.Context, info *BackendInf
 		return
 	}
 	bh.SupportRedirection = len(respBody.Security.SessionTokenSigningCert) > 0
+}
+
+func backendCluster(info *BackendInfo) string {
+	if info == nil || info.Labels == nil {
+		return ""
+	}
+	return info.Labels[config.ClusterLabelName]
 }

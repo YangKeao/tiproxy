@@ -5,6 +5,8 @@ package etcd
 
 import (
 	"context"
+	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,6 +33,27 @@ func TestEtcdClient(t *testing.T) {
 	kvs, err := GetKVs(context.Background(), client, "key", nil, 3*time.Second, 10*time.Millisecond, 3)
 	require.NoError(t, err)
 	require.Equal(t, "value", string(kvs[0].Value))
+
+	require.NoError(t, client.Close())
+	server.Close()
+}
+
+func TestEtcdClientWithCustomDialer(t *testing.T) {
+	lg, _ := logger.CreateLoggerForTest(t)
+	server, err := CreateEtcdServer("0.0.0.0:0", t.TempDir(), lg)
+	require.NoError(t, err)
+	endpoint := server.Clients[0].Addr().String()
+
+	called := int32(0)
+	client, err := InitEtcdClientWithAddrsAndDialer(lg, endpoint, nil, func(ctx context.Context, address string) (net.Conn, error) {
+		atomic.AddInt32(&called, 1)
+		return (&net.Dialer{}).DialContext(ctx, "tcp", address)
+	})
+	require.NoError(t, err)
+
+	_, err = client.Put(context.Background(), "key", "value")
+	require.NoError(t, err)
+	require.Greater(t, atomic.LoadInt32(&called), int32(0))
 
 	require.NoError(t, client.Close())
 	server.Close()

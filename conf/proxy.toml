@@ -28,6 +28,21 @@ graceful-close-conn-timeout = 15
 #		"pd-addr:pd-port" => automatically tidb discovery.
 # pd-addrs = "127.0.0.1:2379"
 
+# Multi-cluster backend discovery. If this is configured, it has higher priority than `pd-addrs`.
+# ns-servers controls the DNS servers used by this backend cluster.
+# [[proxy.backend-clusters]]
+# name = "cluster-a"
+# pd-addrs = "10.0.1.1:2379,10.0.1.2:2379"
+# ns-servers = "10.0.10.2,10.0.10.3:53"
+#
+# [[proxy.backend-clusters]]
+# name = "cluster-b"
+# pd-addrs = "10.0.2.1:2379,10.0.2.2:2379"
+# ns-servers = "10.0.20.2,10.0.20.3:53"
+
+# Listen on a port range with the same host in `addr`.
+# port-range = [10000, 10512]
+
 # possible values:
 #		0 => no limitation.
 #		100 => accept as many as 100 connections.
@@ -117,3 +132,4 @@ graceful-close-conn-timeout = 15
 
 [balance]
 # policy = "resource"
+# routing-rule = "client_cidr" # or "proxy_cidr" or "port"

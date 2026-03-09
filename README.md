@@ -103,6 +103,30 @@ And then start the TiDB cluster with the config.toml.
 
 Where the `pd-addrs` contains the addresses of all PD instances.
 
+For multiple PD clusters, use `proxy.backend-clusters` instead:
+
+```toml
+[[proxy.backend-clusters]]
+name = "cluster-a"
+pd-addrs = "10.0.1.1:2379,10.0.1.2:2379"
+ns-servers = "10.0.10.2,10.0.10.3:53"
+
+[[proxy.backend-clusters]]
+name = "cluster-b"
+pd-addrs = "10.0.2.1:2379,10.0.2.2:2379"
+ns-servers = "10.0.20.2,10.0.20.3:53"
+```
+
+If you route by TiDB label `tiproxy-port`, configure:
+
+```toml
+[balance]
+routing-rule = "port"
+
+[proxy]
+port-range = [10000, 10512]
+```
+
 And then start TiProxy:
 
 ```shell

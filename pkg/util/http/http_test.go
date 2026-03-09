@@ -6,6 +6,7 @@ package http
 import (
 	"context"
 	"crypto/tls"
+	"net"
 	"net/http"
 	"testing"
 	"time"
@@ -50,6 +51,41 @@ func TestHTTPGet(t *testing.T) {
 
 	_, err = httpCli.Get(statusAddr, "", b, time.Millisecond)
 	require.Error(t, err)
+}
+
+func TestHTTPGetWithCluster(t *testing.T) {
+	httpHandler := &mockHttpHandler{
+		t: t,
+	}
+	httpHandler.setHTTPResp(true)
+	httpHandler.setHTTPRespBody("hello")
+	statusListener, statusAddr := testkit.StartListener(t, "")
+	statusServer := &http.Server{Addr: statusAddr, Handler: httpHandler}
+	var wg waitgroup.WaitGroup
+	wg.Run(func() {
+		_ = statusServer.Serve(statusListener)
+	})
+
+	gotCluster := ""
+	httpCli := NewHTTPClientWithDialer(func() *tls.Config { return nil }, func(ctx context.Context, network, address, cluster string, timeout time.Duration) (net.Conn, error) {
+		gotCluster = cluster
+		if timeout > 0 {
+			childCtx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			return (&net.Dialer{}).DialContext(childCtx, network, address)
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	})
+	b := backoff.WithContext(backoff.WithMaxRetries(backoff.NewConstantBackOff(time.Millisecond), uint64(2)), context.Background())
+
+	resp, err := httpCli.GetWithCluster(statusAddr, "", "cluster-a", b, time.Second)
+	require.NoError(t, err)
+	require.Equal(t, "hello", string(resp))
+	require.Equal(t, "cluster-a", gotCluster)
+
+	err = statusServer.Close()
+	require.NoError(t, err)
+	wg.Wait()
 }
 
 type mockHttpHandler struct {

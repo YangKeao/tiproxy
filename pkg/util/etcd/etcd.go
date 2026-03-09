@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 	"time"
@@ -31,6 +32,10 @@ func InitEtcdClient(logger *zap.Logger, cfg *config.Config, certMgr *cert.CertMa
 }
 
 func InitEtcdClientWithAddrs(logger *zap.Logger, pdAddrs string, tlsConfig *tls.Config) (*clientv3.Client, error) {
+	return InitEtcdClientWithAddrsAndDialer(logger, pdAddrs, tlsConfig, nil)
+}
+
+func InitEtcdClientWithAddrsAndDialer(logger *zap.Logger, pdAddrs string, tlsConfig *tls.Config, dialContext func(context.Context, string) (net.Conn, error)) (*clientv3.Client, error) {
 	if len(strings.TrimSpace(pdAddrs)) == 0 {
 		// use tidb server addresses directly
 		return nil, nil
@@ -40,27 +45,31 @@ func InitEtcdClientWithAddrs(logger *zap.Logger, pdAddrs string, tlsConfig *tls.
 		pdEndpoints[i] = strings.TrimSpace(pdEndpoints[i])
 	}
 	logger.Info("connect ETCD servers", zap.Strings("addrs", pdEndpoints))
+	dialOpts := []grpc.DialOption{
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:    10 * time.Second,
+			Timeout: 3 * time.Second,
+		}),
+		grpc.WithConnectParams(grpc.ConnectParams{
+			Backoff: backoff.Config{
+				BaseDelay:  time.Second,
+				Multiplier: 1.1,
+				Jitter:     0.1,
+				MaxDelay:   3 * time.Second,
+			},
+			MinConnectTimeout: 3 * time.Second,
+		}),
+	}
+	if dialContext != nil {
+		dialOpts = append(dialOpts, grpc.WithContextDialer(dialContext))
+	}
 	etcdClient, err := clientv3.New(clientv3.Config{
 		Endpoints:        pdEndpoints,
 		TLS:              tlsConfig,
 		Logger:           logger.Named("etcdcli"),
 		AutoSyncInterval: 30 * time.Second,
 		DialTimeout:      5 * time.Second,
-		DialOptions: []grpc.DialOption{
-			grpc.WithKeepaliveParams(keepalive.ClientParameters{
-				Time:    10 * time.Second,
-				Timeout: 3 * time.Second,
-			}),
-			grpc.WithConnectParams(grpc.ConnectParams{
-				Backoff: backoff.Config{
-					BaseDelay:  time.Second,
-					Multiplier: 1.1,
-					Jitter:     0.1,
-					MaxDelay:   3 * time.Second,
-				},
-				MinConnectTimeout: 3 * time.Second,
-			}),
-		},
+		DialOptions:      dialOpts,
 	})
 	return etcdClient, errors.Wrapf(err, "init etcd client failed")
 }

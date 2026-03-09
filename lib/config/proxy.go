@@ -274,6 +274,9 @@ func (ps *ProxyServer) Check() error {
 		if err := validateAddrList(cluster.PDAddrs, "proxy.backend-clusters.pd-addrs"); err != nil {
 			return err
 		}
+		if err := validateNSServerList(cluster.NSServers, "proxy.backend-clusters.ns-servers"); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -301,6 +304,34 @@ func validateAddrList(addrs, field string) error {
 		}
 	}
 	return nil
+}
+
+func validateNSServerList(nsServers, field string) error {
+	parts := splitAddrList(nsServers)
+	for _, part := range parts {
+		if _, err := normalizeNSServer(part); err != nil {
+			return errors.Wrapf(ErrInvalidConfigValue, "invalid %s address %s", field, part)
+		}
+	}
+	return nil
+}
+
+func normalizeNSServer(server string) (string, error) {
+	host, port, err := net.SplitHostPort(server)
+	if err != nil {
+		trimmed := strings.TrimSpace(server)
+		host = strings.TrimSuffix(strings.TrimPrefix(trimmed, "["), "]")
+		port = "53"
+	}
+	host = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(host, "["), "]"))
+	if host == "" {
+		return "", errors.New("host is empty")
+	}
+	portNum, err := strconv.Atoi(port)
+	if err != nil || portNum < 1 || portNum > 65535 {
+		return "", errors.New("port is invalid")
+	}
+	return net.JoinHostPort(host, strconv.Itoa(portNum)), nil
 }
 
 func (ps *ProxyServer) GetSQLAddrs() ([]string, error) {

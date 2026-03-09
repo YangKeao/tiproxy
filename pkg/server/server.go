@@ -26,6 +26,7 @@ import (
 	"github.com/pingcap/tiproxy/pkg/sctx"
 	"github.com/pingcap/tiproxy/pkg/server/api"
 	mgrrp "github.com/pingcap/tiproxy/pkg/sqlreplay/manager"
+	"github.com/pingcap/tiproxy/pkg/util/dns"
 	"github.com/pingcap/tiproxy/pkg/util/etcd"
 	"github.com/pingcap/tiproxy/pkg/util/http"
 	"github.com/pingcap/tiproxy/pkg/util/versioninfo"
@@ -52,6 +53,8 @@ type Server struct {
 	memManager       *memory.MemManager
 	// etcd client
 	etcdCli *clientv3.Client
+	// DNS dialer manager for backend clusters
+	clusterDNS *dns.ClusterDialerManager
 	// HTTP client
 	httpCli *http.Client
 	// HTTP server
@@ -120,9 +123,33 @@ func NewServer(ctx context.Context, sctx *sctx.Context) (srv *Server, err error)
 		return
 	}
 
+	// setup DNS dialer manager for backend clusters
+	{
+		srv.clusterDNS = dns.NewClusterDialerManager(lg.Named("dns"))
+		if err = srv.clusterDNS.UpdateConfig(cfg); err != nil {
+			return
+		}
+		cfgCh := srv.configManager.WatchConfig()
+		srv.wg.RunWithRecover(func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case updated := <-cfgCh:
+					if updated == nil {
+						return
+					}
+					if err := srv.clusterDNS.UpdateConfig(updated); err != nil {
+						lg.Error("update cluster dns config failed", zap.Error(err))
+					}
+				}
+			}
+		}, nil, lg.Named("dns"))
+	}
+
 	// general cluster HTTP client
 	{
-		srv.httpCli = http.NewHTTPClient(srv.certManager.ClusterTLS)
+		srv.httpCli = http.NewHTTPClientWithDialer(srv.certManager.ClusterTLS, srv.clusterDNS.DialContext)
 	}
 
 	// setup info syncer

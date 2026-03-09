@@ -176,6 +176,16 @@ func (b *backendWrapper) Keyspace() string {
 	return labels[config.KeyspaceLabelName]
 }
 
+func (b *backendWrapper) Cluster() string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	labels := b.mu.BackendHealth.Labels
+	if labels == nil {
+		return ""
+	}
+	return labels[config.ClusterLabelName]
+}
+
 func (b *backendWrapper) Cidr() []string {
 	labels := b.getHealth().Labels
 	if len(labels) == 0 {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/pingcap/tiproxy/lib/config"
 	"github.com/pingcap/tiproxy/lib/util/errors"
+	"github.com/pingcap/tiproxy/pkg/util/dns"
 	"github.com/pingcap/tiproxy/pkg/util/etcd"
 	"github.com/pingcap/tiproxy/pkg/util/waitgroup"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -20,9 +21,10 @@ import (
 )
 
 type clusterClient struct {
-	name    string
-	pdAddrs string
-	etcdCli *clientv3.Client
+	name      string
+	pdAddrs   string
+	nsServers string
+	etcdCli   *clientv3.Client
 }
 
 // MultiClusterFetcher fetches topology and Prometheus info from multiple PD clusters.
@@ -105,13 +107,31 @@ func (mcf *MultiClusterFetcher) syncClusters(cfg *config.Config) error {
 
 	for _, cluster := range desiredClusters {
 		oldClient, ok := oldClusters[cluster.Name]
-		if ok && strings.TrimSpace(oldClient.pdAddrs) == strings.TrimSpace(cluster.PDAddrs) {
+		if ok && strings.TrimSpace(oldClient.pdAddrs) == strings.TrimSpace(cluster.PDAddrs) &&
+			strings.TrimSpace(oldClient.nsServers) == strings.TrimSpace(cluster.NSServers) {
 			newClusters[cluster.Name] = oldClient
 			delete(oldClusters, cluster.Name)
 			continue
 		}
 
-		etcdCli, err := etcd.InitEtcdClientWithAddrs(mcf.lg.With(zap.String("cluster", cluster.Name)), cluster.PDAddrs, mcf.clusterTLS())
+		d, err := dns.NewDialer(mcf.lg.With(zap.String("cluster", cluster.Name)), cluster.NSServers)
+		if err != nil {
+			if ok {
+				mcf.lg.Warn("failed to update backend cluster DNS config, keep the old one", zap.String("cluster", cluster.Name), zap.Error(err))
+				newClusters[cluster.Name] = oldClient
+				delete(oldClusters, cluster.Name)
+				continue
+			}
+			mcf.lg.Error("failed to add backend cluster DNS config", zap.String("cluster", cluster.Name), zap.Error(err))
+			continue
+		}
+
+		etcdCli, err := etcd.InitEtcdClientWithAddrsAndDialer(
+			mcf.lg.With(zap.String("cluster", cluster.Name)),
+			cluster.PDAddrs,
+			mcf.clusterTLS(),
+			d.GRPCDialContext,
+		)
 		if err != nil {
 			if ok {
 				mcf.lg.Warn("failed to update backend cluster client, keep the old one", zap.String("cluster", cluster.Name), zap.Error(err))
@@ -123,9 +143,10 @@ func (mcf *MultiClusterFetcher) syncClusters(cfg *config.Config) error {
 			continue
 		}
 		newClusters[cluster.Name] = &clusterClient{
-			name:    cluster.Name,
-			pdAddrs: cluster.PDAddrs,
-			etcdCli: etcdCli,
+			name:      cluster.Name,
+			pdAddrs:   cluster.PDAddrs,
+			nsServers: cluster.NSServers,
+			etcdCli:   etcdCli,
 		}
 		if ok {
 			closeList = append(closeList, oldClient)

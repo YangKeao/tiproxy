@@ -174,6 +174,14 @@ func TestProxyCheck(t *testing.T) {
 			},
 			err: ErrInvalidConfigValue,
 		},
+		{
+			pre: func(t *testing.T, c *Config) {
+				c.Proxy.BackendClusters = []BackendCluster{
+					{Name: "c1", PDAddrs: "127.0.0.1:2379", NSServers: "10.0.0.1:abc"},
+				}
+			},
+			err: ErrInvalidConfigValue,
+		},
 	}
 	for _, tc := range testcases {
 		cfg := testProxyConfig

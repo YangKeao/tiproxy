@@ -246,6 +246,27 @@ func TestPortRange(t *testing.T) {
 	certManager.Close()
 }
 
+func TestBackendClusterNSServersInvalid(t *testing.T) {
+	lg, _ := logger.CreateLoggerForTest(t)
+	certManager := cert.NewCertManager()
+	err := certManager.Init(&config.Config{}, lg, nil)
+	require.NoError(t, err)
+	_, err = NewSQLServer(lg, &config.Config{
+		Proxy: config.ProxyServer{
+			Addr: "127.0.0.1:6000",
+			BackendClusters: []config.BackendCluster{
+				{
+					Name:      "cluster-a",
+					PDAddrs:   "127.0.0.1:2379",
+					NSServers: "10.0.0.1:abc",
+				},
+			},
+		},
+	}, certManager, id.NewIDManager(), nil, nil, &mockHsHandler{})
+	require.Error(t, err)
+	certManager.Close()
+}
+
 func TestWatchCfg(t *testing.T) {
 	lg, _ := logger.CreateLoggerForTest(t)
 	hsHandler := backend.NewDefaultHandshakeHandler(nil)

@@ -79,6 +79,7 @@ func (mer *mockEventReceiver) checkEvent(t *testing.T, eventName int) event {
 
 type mockBackendInst struct {
 	addr     string
+	cluster  string
 	keyspace string
 	healthy  atomic.Bool
 	local    atomic.Bool
@@ -119,6 +120,10 @@ func (mbi *mockBackendInst) Keyspace() string {
 
 func (mbi *mockBackendInst) setKeyspace(k string) {
 	mbi.keyspace = k
+}
+
+func (mbi *mockBackendInst) Cluster() string {
+	return mbi.cluster
 }
 
 type runner struct {
@@ -315,6 +320,30 @@ func TestBCCheck(t *testing.T) {
 		test.original.check()
 		require.Equal(t, *test.final, *test.original)
 	}
+}
+
+func TestDialBackendWithCluster(t *testing.T) {
+	var gotCluster, gotAddr string
+	var gotTimeout time.Duration
+	serverConn, clientConn := net.Pipe()
+	cfg := &BCConfig{
+		DialTimeout: time.Second,
+		DialBackend: func(ctx context.Context, network, address, cluster string, timeout time.Duration) (net.Conn, error) {
+			gotCluster = cluster
+			gotAddr = address
+			gotTimeout = timeout
+			return clientConn, nil
+		},
+	}
+	mgr := NewBackendConnManager(zap.NewNop(), &CustomHandshakeHandler{}, nil, 0, cfg, nil)
+
+	conn, err := mgr.dialBackend(context.Background(), "tidb-a:4000", "cluster-a")
+	require.NoError(t, err)
+	require.Equal(t, "cluster-a", gotCluster)
+	require.Equal(t, "tidb-a:4000", gotAddr)
+	require.Equal(t, time.Second, gotTimeout)
+	require.NoError(t, conn.Close())
+	require.NoError(t, serverConn.Close())
 }
 
 // Test that redirection succeeds immediately if the session is redirect-able.

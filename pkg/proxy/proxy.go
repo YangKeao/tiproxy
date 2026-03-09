@@ -20,6 +20,7 @@ import (
 	"github.com/pingcap/tiproxy/pkg/proxy/keepalive"
 	pnet "github.com/pingcap/tiproxy/pkg/proxy/net"
 	"github.com/pingcap/tiproxy/pkg/sqlreplay/capture"
+	"github.com/pingcap/tiproxy/pkg/util/dns"
 	"github.com/pingcap/tiproxy/pkg/util/netutil"
 	"github.com/pingcap/tiproxy/pkg/util/waitgroup"
 	"go.uber.org/zap"
@@ -49,6 +50,7 @@ type SQLServer struct {
 	hsHandler  backend.HandshakeHandler
 	cpt        capture.Capture
 	meter      backend.Meter
+	clusterDNS *dns.ClusterDialerManager
 	wg         waitgroup.WaitGroup
 	cancelFunc context.CancelFunc
 
@@ -60,18 +62,22 @@ func NewSQLServer(logger *zap.Logger, cfg *config.Config, certMgr *cert.CertMana
 	meter backend.Meter, hsHandler backend.HandshakeHandler) (*SQLServer, error) {
 	var err error
 	s := &SQLServer{
-		logger:    logger,
-		certMgr:   certMgr,
-		idMgr:     idMgr,
-		hsHandler: hsHandler,
-		cpt:       cpt,
-		meter:     meter,
+		logger:     logger,
+		certMgr:    certMgr,
+		idMgr:      idMgr,
+		hsHandler:  hsHandler,
+		cpt:        cpt,
+		meter:      meter,
+		clusterDNS: dns.NewClusterDialerManager(logger.Named("dns")),
 		mu: serverState{
 			clients: make(map[uint64]*client.ClientConnection),
 		},
 	}
 
 	s.reset(cfg)
+	if err = s.clusterDNS.UpdateConfig(cfg); err != nil {
+		return nil, err
+	}
 
 	s.addrs, err = cfg.Proxy.GetSQLAddrs()
 	if err != nil {
@@ -122,6 +128,9 @@ func (s *SQLServer) Run(ctx context.Context, cfgch <-chan *config.Config) {
 					return
 				}
 				s.reset(ach)
+				if err := s.clusterDNS.UpdateConfig(ach); err != nil {
+					s.logger.Error("update cluster dns config failed", zap.Error(err))
+				}
 			}
 		}
 	}, nil, s.logger)
@@ -173,6 +182,7 @@ func (s *SQLServer) onConn(ctx context.Context, conn net.Conn, addr string) {
 				RequireBackendTLS:   s.mu.requireBackendTLS,
 				HealthyKeepAlive:    s.mu.healthyKeepAlive,
 				UnhealthyKeepAlive:  s.mu.unhealthyKeepAlive,
+				DialBackend:         s.clusterDNS.DialContext,
 				ConnBufferSize:      s.mu.connBufferSize,
 				FromPublicEndpoints: s.fromPublicEndpoint,
 			}, s.meter)

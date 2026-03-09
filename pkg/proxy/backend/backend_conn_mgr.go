@@ -91,6 +91,7 @@ type BCConfig struct {
 	HealthyKeepAlive     config.KeepAlive
 	UnhealthyKeepAlive   config.KeepAlive
 	FromPublicEndpoints  func(addr net.Addr) bool
+	DialBackend          func(ctx context.Context, network, address, cluster string, timeout time.Duration) (net.Conn, error)
 	TickerInterval       time.Duration
 	CheckBackendInterval time.Duration
 	DialTimeout          time.Duration
@@ -312,7 +313,7 @@ func (mgr *BackendConnManager) getBackendIO(ctx context.Context, cctx ConnContex
 
 			var cn net.Conn
 			addr = backend.Addr()
-			cn, err = net.DialTimeout("tcp", addr, mgr.config.DialTimeout)
+			cn, err = mgr.dialBackend(ctx, addr, getBackendCluster(backend))
 			selector.Finish(mgr, err == nil)
 			if err != nil {
 				metrics.DialBackendFailCounter.WithLabelValues(addr).Inc()
@@ -645,7 +646,7 @@ func (mgr *BackendConnManager) tryRedirect(ctx context.Context) {
 	}
 
 	var cn net.Conn
-	cn, rs.err = net.DialTimeout("tcp", rs.to, mgr.config.DialTimeout)
+	cn, rs.err = mgr.dialBackend(ctx, rs.to, getBackendCluster(*backendInst))
 	if rs.err != nil {
 		mgr.handshakeHandler.OnHandshake(mgr, rs.to, rs.err, SrcBackendNetwork)
 		return
@@ -688,6 +689,24 @@ func (mgr *BackendConnManager) updateAuthInfoFromSessionStates(sessionStates []b
 		mgr.authenticator.updateCurrentDB(currentDB)
 	}
 	return nil
+}
+
+func (mgr *BackendConnManager) dialBackend(ctx context.Context, addr, cluster string) (net.Conn, error) {
+	if mgr.config.DialBackend != nil {
+		return mgr.config.DialBackend(ctx, "tcp", addr, cluster, mgr.config.DialTimeout)
+	}
+	return net.DialTimeout("tcp", addr, mgr.config.DialTimeout)
+}
+
+func getBackendCluster(backend router.BackendInst) string {
+	if backend == nil {
+		return ""
+	}
+	cluster, ok := backend.(interface{ Cluster() string })
+	if !ok {
+		return ""
+	}
+	return cluster.Cluster()
 }
 
 // Redirect implements RedirectableConn.Redirect interface. It redirects the current session to the newAddr.

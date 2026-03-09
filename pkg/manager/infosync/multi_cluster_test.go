@@ -178,3 +178,54 @@ func TestMultiClusterFetcherDynamicUpdate(t *testing.T) {
 	_, err = fetcher.GetPromInfo(context.Background())
 	require.ErrorIs(t, err, ErrNoProm)
 }
+
+func TestMultiClusterFetcherUpdateNSServers(t *testing.T) {
+	clusterA := newTestEtcdCluster(t)
+	t.Cleanup(func() { clusterA.close(t) })
+
+	initialCfg := config.NewConfig()
+	initialCfg.Proxy.PDAddrs = ""
+	initialCfg.Proxy.BackendClusters = []config.BackendCluster{
+		{
+			Name:      "cluster-a",
+			PDAddrs:   clusterA.addr,
+			NSServers: "10.0.0.1",
+		},
+	}
+	cfgGetter := &mockConfigGetter{cfg: initialCfg}
+	cfgCh := make(chan *config.Config, 8)
+
+	lg, _ := logger.CreateLoggerForTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	fetcher := NewMultiClusterFetcher(lg, func() *tls.Config { return nil }, cfgGetter, cfgCh)
+	require.NoError(t, fetcher.Start(ctx))
+	t.Cleanup(func() {
+		require.NoError(t, fetcher.Close())
+	})
+
+	var oldClient *clientv3.Client
+	require.Eventually(t, func() bool {
+		snapshot := fetcher.clusterSnapshot()
+		cluster, ok := snapshot["cluster-a"]
+		if !ok || cluster == nil || cluster.etcdCli == nil {
+			return false
+		}
+		oldClient = cluster.etcdCli
+		return cluster.nsServers == "10.0.0.1"
+	}, 5*time.Second, 100*time.Millisecond)
+
+	updatedCfg := initialCfg.Clone()
+	updatedCfg.Proxy.BackendClusters[0].NSServers = "10.0.0.2"
+	cfgGetter.SetConfig(updatedCfg)
+	cfgCh <- updatedCfg.Clone()
+
+	require.Eventually(t, func() bool {
+		snapshot := fetcher.clusterSnapshot()
+		cluster, ok := snapshot["cluster-a"]
+		if !ok || cluster == nil || cluster.etcdCli == nil {
+			return false
+		}
+		return cluster.nsServers == "10.0.0.2" && cluster.etcdCli != oldClient
+	}, 5*time.Second, 100*time.Millisecond)
+}

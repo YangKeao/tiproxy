@@ -5,6 +5,7 @@ package observer
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -14,9 +15,11 @@ import (
 	"time"
 
 	"github.com/go-mysql-org/go-mysql/packet"
+	"github.com/pingcap/tiproxy/lib/config"
 	"github.com/pingcap/tiproxy/lib/util/logger"
 	"github.com/pingcap/tiproxy/lib/util/waitgroup"
 	"github.com/pingcap/tiproxy/pkg/testkit"
+	httputil "github.com/pingcap/tiproxy/pkg/util/http"
 	"github.com/stretchr/testify/require"
 )
 
@@ -118,6 +121,34 @@ func TestSupportRedirection(t *testing.T) {
 	health.lastCheckSigningCertTime = time.Time{}
 	health = hc.Check(context.Background(), backend.sqlAddr, info, health)
 	require.False(t, health.SupportRedirection)
+}
+
+func TestHealthCheckClusterDialer(t *testing.T) {
+	lg, _ := logger.CreateLoggerForTest(t)
+	cfg := newHealthCheckConfigForTest()
+	var gotCluster atomic.Value
+	gotCluster.Store("")
+	httpCli := httputil.NewHTTPClientWithDialer(func() *tls.Config { return nil }, func(ctx context.Context, network, address, cluster string, timeout time.Duration) (net.Conn, error) {
+		gotCluster.Store(cluster)
+		if timeout > 0 {
+			childCtx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			return (&net.Dialer{}).DialContext(childCtx, network, address)
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	})
+	hc := NewDefaultHealthCheck(httpCli, cfg, lg)
+	backend, info := newBackendServer(t)
+	defer backend.close()
+	info.Labels = map[string]string{
+		config.ClusterLabelName: "cluster-a",
+	}
+	backend.setServerVersion("1.0")
+	backend.setHasSigningCert(true)
+
+	health := hc.Check(context.Background(), backend.sqlAddr, info, nil)
+	require.True(t, health.Healthy)
+	require.Equal(t, "cluster-a", gotCluster.Load().(string))
 }
 
 type backendServer struct {
