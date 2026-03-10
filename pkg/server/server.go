@@ -45,7 +45,7 @@ type Server struct {
 	loggerManager    *logger.LoggerManager
 	certManager      *cert.CertManager
 	vipManager       vip.VIPManager
-	infoSyncer       *infosync.InfoSyncer
+	infoSyncer       *infosync.MultiClusterInfoSyncer
 	clusterFetcher   *infosync.MultiClusterFetcher
 	metricsReader    metricsreader.MetricsReader
 	replay           mgrrp.JobManager
@@ -111,12 +111,6 @@ func NewServer(ctx context.Context, sctx *sctx.Context) (srv *Server, err error)
 		return
 	}
 
-	// setup etcd client
-	srv.etcdCli, err = etcd.InitEtcdClient(lg.Named("etcd"), cfg, srv.certManager)
-	if err != nil {
-		return
-	}
-
 	// setup backend-cluster fetcher
 	srv.clusterFetcher = infosync.NewMultiClusterFetcher(lg.Named("cluster_fetcher"), srv.certManager.ClusterTLS, srv.configManager, srv.configManager.WatchConfig())
 	if err = srv.clusterFetcher.Start(ctx); err != nil {
@@ -152,18 +146,27 @@ func NewServer(ctx context.Context, sctx *sctx.Context) (srv *Server, err error)
 		srv.httpCli = http.NewHTTPClientWithDialer(srv.certManager.ClusterTLS, srv.clusterDNS.DialContext)
 	}
 
-	// setup info syncer
-	if cfg.Proxy.PDAddrs != "" {
-		srv.infoSyncer = infosync.NewInfoSyncer(lg.Named("infosync"), srv.etcdCli)
-		if err = srv.infoSyncer.Init(ctx, cfg); err != nil {
+	// setup info syncer for all backend clusters
+	srv.infoSyncer = infosync.NewMultiClusterInfoSyncer(lg.Named("infosync"), srv.certManager.ClusterTLS, srv.configManager, srv.configManager.WatchConfig())
+	if err = srv.infoSyncer.Start(ctx); err != nil {
+		return
+	}
+
+	// setup single-cluster etcd client for single-cluster services (e.g. VIP)
+	backendClusters := cfg.GetBackendClusters()
+	if len(backendClusters) == 1 {
+		srv.etcdCli, err = initClusterEtcdClient(lg.Named("etcd"), backendClusters[0], srv.certManager)
+		if err != nil {
 			return
 		}
+	} else {
+		lg.Info("skip single-cluster etcd client initialization", zap.Int("cluster_count", len(backendClusters)))
 	}
 
 	// setup metrics reader
 	{
 		healthCheckCfg := config.NewDefaultHealthCheckConfig()
-		srv.metricsReader = metricsreader.NewDefaultMetricsReader(lg.Named("mr"), srv.clusterFetcher, srv.clusterFetcher, srv.httpCli, srv.etcdCli, healthCheckCfg, srv.configManager)
+		srv.metricsReader = metricsreader.NewDefaultMetricsReader(lg.Named("mr"), srv.clusterFetcher, srv.clusterFetcher, srv.httpCli, srv.etcdCli, srv.certManager.ClusterTLS, healthCheckCfg, srv.configManager)
 		if err = srv.metricsReader.Start(ctx); err != nil {
 			return
 		}
@@ -248,14 +251,31 @@ func NewServer(ctx context.Context, sctx *sctx.Context) (srv *Server, err error)
 			return
 		}
 		if srv.vipManager != nil && !reflect.ValueOf(srv.vipManager).IsNil() {
-			if err = srv.vipManager.Start(ctx, srv.etcdCli); err != nil {
-				return
+			if len(backendClusters) == 1 {
+				if err = srv.vipManager.Start(ctx, srv.etcdCli); err != nil {
+					return
+				}
+			} else {
+				lg.Info("VIP is disabled because backend cluster count is not 1", zap.Int("cluster_count", len(backendClusters)))
 			}
 		}
 	}
 
 	ready.Toggle()
 	return
+}
+
+func initClusterEtcdClient(lg *zap.Logger, cluster config.BackendCluster, certMgr *cert.CertManager) (*clientv3.Client, error) {
+	d, err := dns.NewDialer(lg.With(zap.String("cluster", cluster.Name)), cluster.NSServers)
+	if err != nil {
+		return nil, err
+	}
+	return etcd.InitEtcdClientWithAddrsAndDialer(
+		lg.With(zap.String("cluster", cluster.Name)),
+		cluster.PDAddrs,
+		certMgr.ClusterTLS(),
+		d.GRPCDialContext,
+	)
 }
 
 func printInfo(lg *zap.Logger, cfg *config.Config) {

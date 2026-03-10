@@ -5,6 +5,7 @@ package metricsreader
 
 import (
 	"context"
+	"crypto/tls"
 	"sync/atomic"
 	"time"
 
@@ -55,12 +56,12 @@ type DefaultMetricsReader struct {
 }
 
 func NewDefaultMetricsReader(lg *zap.Logger, promFetcher PromInfoFetcher, backendFetcher TopologyFetcher, httpCli *http.Client,
-	etcdCli *clientv3.Client, cfg *config.HealthCheck, cfgGetter config.ConfigGetter) *DefaultMetricsReader {
+	etcdCli *clientv3.Client, clusterTLS func() *tls.Config, cfg *config.HealthCheck, cfgGetter config.ConfigGetter) *DefaultMetricsReader {
 	return &DefaultMetricsReader{
 		lg:            lg,
 		cfg:           cfg,
 		promReader:    NewPromReader(lg.Named("prom_reader"), promFetcher, cfg),
-		backendReader: NewBackendReader(lg.Named("backend_reader"), cfgGetter, httpCli, etcdCli, backendFetcher, cfg),
+		backendReader: NewBackendReader(lg.Named("backend_reader"), cfgGetter, httpCli, etcdCli, clusterTLS, backendFetcher, cfg),
 	}
 }
 

@@ -65,6 +65,7 @@ type InfoSyncer struct {
 	wg              waitgroup.WaitGroup
 	cancelFunc      context.CancelFunc
 	topologySession *concurrency.Session
+	topologyAddr    string
 }
 
 type syncConfig struct {
@@ -136,6 +137,7 @@ func (is *InfoSyncer) Init(ctx context.Context, cfg *config.Config) error {
 
 	childCtx, cancelFunc := context.WithCancel(ctx)
 	is.cancelFunc = cancelFunc
+	is.topologyAddr = net.JoinHostPort(topologyInfo.IP, topologyInfo.Port)
 	is.wg.RunWithRecover(func() {
 		err := is.updateTopologyLivenessLoop(childCtx, topologyInfo)
 		if err != nil && !errors.Is(err, context.Canceled) {
@@ -246,10 +248,16 @@ func (is *InfoSyncer) updateTopologyAliveness(ctx context.Context, topologyInfo 
 func (is *InfoSyncer) removeTopology(ctx context.Context) error {
 	// removeTopology is called when closing TiProxy. We shouldn't make it too long, so we don't retry here.
 	// It will be removed automatically after TTL expires.
+	if is.topologyAddr == "" {
+		return nil
+	}
 	childCtx, cancel := context.WithTimeout(ctx, is.syncConfig.putTimeout)
-	_, err := is.etcdCli.Delete(childCtx, tiproxyTopologyPath, clientv3.WithPrefix())
+	infoKey := fmt.Sprintf("%s/%s/%s", tiproxyTopologyPath, is.topologyAddr, infoSuffix)
+	ttlKey := fmt.Sprintf("%s/%s/%s", tiproxyTopologyPath, is.topologyAddr, ttlSuffix)
+	_, err1 := is.etcdCli.Delete(childCtx, infoKey)
+	_, err2 := is.etcdCli.Delete(childCtx, ttlKey)
 	cancel()
-	return errors.WithStack(err)
+	return errors.Collect(errors.New("remove topology"), errors.WithStack(err1), errors.WithStack(err2))
 }
 
 func (is *InfoSyncer) GetTiDBTopology(ctx context.Context) (map[string]*TiDBTopologyInfo, error) {

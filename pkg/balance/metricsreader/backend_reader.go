@@ -5,6 +5,7 @@ package metricsreader
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -21,6 +22,7 @@ import (
 	"github.com/pingcap/tiproxy/lib/util/errors"
 	"github.com/pingcap/tiproxy/pkg/manager/elect"
 	"github.com/pingcap/tiproxy/pkg/metrics"
+	"github.com/pingcap/tiproxy/pkg/util/dns"
 	"github.com/pingcap/tiproxy/pkg/util/etcd"
 	"github.com/pingcap/tiproxy/pkg/util/http"
 	"github.com/pingcap/tiproxy/pkg/util/waitgroup"
@@ -28,7 +30,6 @@ import (
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
 	"github.com/siddontang/go/hack"
-	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 )
@@ -64,6 +65,38 @@ type backendHistory struct {
 	Step2History []model.SamplePair
 }
 
+type ownerGroup struct {
+	zones  []string
+	owners []string
+}
+
+type clusterOwner struct {
+	name      string
+	pdAddrs   string
+	nsServers string
+	zone      string
+	etcdCli   *clientv3.Client
+	election  elect.Election
+	isOwner   atomic.Bool
+}
+
+type clusterOwnerMember struct {
+	onElected func()
+	onRetired func()
+}
+
+func (m *clusterOwnerMember) OnElected() {
+	if m.onElected != nil {
+		m.onElected()
+	}
+}
+
+func (m *clusterOwnerMember) OnRetired() {
+	if m.onRetired != nil {
+		m.onRetired()
+	}
+}
+
 type BackendReader struct {
 	sync.Mutex
 	// rule key: QueryRule
@@ -78,19 +111,29 @@ type BackendReader struct {
 	marshalledHistory []byte
 	cfgGetter         config.ConfigGetter
 	backendFetcher    TopologyFetcher
-	lastZone          string
+	ownerID           string
+	clusterZone       string
+	clusterMu         sync.RWMutex
+	clusterOwners     map[string]*clusterOwner
 	electionCfg       elect.ElectionConfig
-	election          elect.Election
-	isOwner           atomic.Bool
-	wgp               *waitgroup.WaitGroupPool
-	etcdCli           *clientv3.Client
-	httpCli           *http.Client
-	lg                *zap.Logger
-	cfg               *config.HealthCheck
+	// isOwner is kept for compatibility with existing tests and indicates whether this member
+	// is owner for at least one backend cluster.
+	isOwner atomic.Bool
+	wgp     *waitgroup.WaitGroupPool
+	// etcdCli is a legacy fallback used by tests that construct BackendReader without config.
+	etcdCli    *clientv3.Client
+	clusterTLS func() *tls.Config
+	httpCli    *http.Client
+	lg         *zap.Logger
+	cfg        *config.HealthCheck
 }
 
 func NewBackendReader(lg *zap.Logger, cfgGetter config.ConfigGetter, httpCli *http.Client, etcdCli *clientv3.Client,
+	clusterTLS func() *tls.Config,
 	backendFetcher TopologyFetcher, cfg *config.HealthCheck) *BackendReader {
+	if clusterTLS == nil {
+		clusterTLS = func() *tls.Config { return nil }
+	}
 	return &BackendReader{
 		queryRules:        make(map[string]QueryRule),
 		queryResults:      make(map[string]QueryResult),
@@ -101,44 +144,212 @@ func NewBackendReader(lg *zap.Logger, cfgGetter config.ConfigGetter, httpCli *ht
 		cfg:               cfg,
 		wgp:               waitgroup.NewWaitGroupPool(goPoolSize, goMaxIdle),
 		electionCfg:       elect.DefaultElectionConfig(sessionTTL),
+		clusterOwners:     make(map[string]*clusterOwner),
 		etcdCli:           etcdCli,
+		clusterTLS:        clusterTLS,
 		httpCli:           httpCli,
 		marshalledHistory: []byte{},
 	}
 }
 
 func (br *BackendReader) Start(ctx context.Context) error {
+	if br.cfgGetter == nil {
+		return nil
+	}
 	cfg := br.cfgGetter.GetConfig()
-	return br.initElection(ctx, cfg)
+	if cfg == nil {
+		return nil
+	}
+	if err := br.ensureOwnerID(cfg); err != nil {
+		return err
+	}
+	return br.syncClusterOwners(ctx, cfg)
 }
 
-func (br *BackendReader) initElection(ctx context.Context, cfg *config.Config) error {
+func (br *BackendReader) ensureOwnerID(cfg *config.Config) error {
+	if cfg == nil || br.ownerID != "" {
+		return nil
+	}
 	ip, _, statusPort, err := cfg.GetIPPort()
 	if err != nil {
 		return err
 	}
-
 	// Use the status address as the key so that it can read metrics from the address.
-	id := net.JoinHostPort(ip, statusPort)
-	var key string
-	br.lastZone = cfg.GetLocation()
-	if len(br.lastZone) > 0 {
-		// Zonal owners are responsible for the backends in the same zone or not in any TiProxy zone.
-		key = fmt.Sprintf("%s/%s/%s", readerOwnerKeyPrefix, br.lastZone, readerOwnerKeySuffix)
-	} else {
-		key = fmt.Sprintf("%s/%s", readerOwnerKeyPrefix, readerOwnerKeySuffix)
-	}
-	br.election = elect.NewElection(br.lg.Named("elect"), br.etcdCli, br.electionCfg, id, key, br)
-	br.election.Start(ctx)
+	br.ownerID = net.JoinHostPort(ip, statusPort)
 	return nil
 }
 
-func (br *BackendReader) OnElected() {
-	br.isOwner.Store(true)
+func ownerKeyPrefixForCluster(clusterName string) string {
+	if clusterName == "" || clusterName == "default" {
+		return readerOwnerKeyPrefix
+	}
+	return fmt.Sprintf("%s/%s", readerOwnerKeyPrefix, clusterName)
 }
 
-func (br *BackendReader) OnRetired() {
+func ownerKeyForCluster(clusterName, zone string) string {
+	keyPrefix := ownerKeyPrefixForCluster(clusterName)
+	if zone != "" {
+		return fmt.Sprintf("%s/%s/%s", keyPrefix, zone, readerOwnerKeySuffix)
+	}
+	return fmt.Sprintf("%s/%s", keyPrefix, readerOwnerKeySuffix)
+}
+
+func (br *BackendReader) newClusterOwner(ctx context.Context, cluster config.BackendCluster, zone string) (*clusterOwner, error) {
+	d, err := dns.NewDialer(br.lg.With(zap.String("cluster", cluster.Name)), cluster.NSServers)
+	if err != nil {
+		return nil, err
+	}
+	etcdCli, err := etcd.InitEtcdClientWithAddrsAndDialer(
+		br.lg.With(zap.String("cluster", cluster.Name)),
+		cluster.PDAddrs,
+		br.clusterTLS(),
+		d.GRPCDialContext,
+	)
+	if err != nil {
+		return nil, err
+	}
+	newOwner := &clusterOwner{
+		name:      cluster.Name,
+		pdAddrs:   cluster.PDAddrs,
+		nsServers: cluster.NSServers,
+		zone:      zone,
+		etcdCli:   etcdCli,
+	}
+	member := &clusterOwnerMember{
+		onElected: func() {
+			newOwner.isOwner.Store(true)
+			br.refreshOwnerState()
+		},
+		onRetired: func() {
+			newOwner.isOwner.Store(false)
+			br.refreshOwnerState()
+		},
+	}
+	newOwner.election = elect.NewElection(
+		br.lg.Named("elect").With(zap.String("cluster", cluster.Name)),
+		etcdCli,
+		br.electionCfg,
+		br.ownerID,
+		ownerKeyForCluster(cluster.Name, zone),
+		member,
+	)
+	newOwner.election.Start(ctx)
+	return newOwner, nil
+}
+
+func (br *BackendReader) syncClusterOwners(ctx context.Context, cfg *config.Config) error {
+	if cfg == nil {
+		return nil
+	}
+	if err := br.ensureOwnerID(cfg); err != nil {
+		return err
+	}
+	zone := cfg.GetLocation()
+	desiredClusters := cfg.GetBackendClusters()
+	desiredMap := make(map[string]config.BackendCluster, len(desiredClusters))
+	for _, cluster := range desiredClusters {
+		desiredMap[cluster.Name] = cluster
+	}
+
+	br.clusterMu.Lock()
+	oldClusters := br.clusterOwners
+	newClusters := make(map[string]*clusterOwner, len(desiredClusters))
+	closeList := make([]*clusterOwner, 0, len(oldClusters))
+
+	for _, cluster := range desiredClusters {
+		oldOwner, ok := oldClusters[cluster.Name]
+		if ok && strings.TrimSpace(oldOwner.pdAddrs) == strings.TrimSpace(cluster.PDAddrs) &&
+			strings.TrimSpace(oldOwner.nsServers) == strings.TrimSpace(cluster.NSServers) &&
+			strings.TrimSpace(oldOwner.zone) == strings.TrimSpace(zone) {
+			newClusters[cluster.Name] = oldOwner
+			delete(oldClusters, cluster.Name)
+			continue
+		}
+
+		newOwner, err := br.newClusterOwner(ctx, cluster, zone)
+		if err != nil {
+			if ok {
+				br.lg.Warn("failed to update backend metrics owner cluster, keep old one", zap.String("cluster", cluster.Name), zap.Error(err))
+				newClusters[cluster.Name] = oldOwner
+				delete(oldClusters, cluster.Name)
+				continue
+			}
+			br.lg.Error("failed to add backend metrics owner cluster", zap.String("cluster", cluster.Name), zap.Error(err))
+			continue
+		}
+		newClusters[cluster.Name] = newOwner
+		if ok {
+			closeList = append(closeList, oldOwner)
+			delete(oldClusters, cluster.Name)
+			br.lg.Info("updated backend metrics owner cluster", zap.String("cluster", cluster.Name), zap.String("pd_addrs", cluster.PDAddrs))
+		} else {
+			br.lg.Info("added backend metrics owner cluster", zap.String("cluster", cluster.Name), zap.String("pd_addrs", cluster.PDAddrs))
+		}
+	}
+
+	for name, owner := range oldClusters {
+		if _, ok := desiredMap[name]; ok {
+			continue
+		}
+		closeList = append(closeList, owner)
+		br.lg.Info("removed backend metrics owner cluster", zap.String("cluster", name), zap.String("pd_addrs", owner.pdAddrs))
+	}
+
+	br.clusterOwners = newClusters
+	br.clusterZone = zone
+	br.clusterMu.Unlock()
+
+	for _, owner := range closeList {
+		br.closeClusterOwner(owner, true)
+	}
+	br.refreshOwnerState()
+	return nil
+}
+
+func (br *BackendReader) closeClusterOwner(owner *clusterOwner, closeEtcd bool) {
+	if owner == nil {
+		return
+	}
+	if owner.election != nil {
+		owner.election.Close()
+	}
+	if closeEtcd && owner.etcdCli != nil {
+		if err := owner.etcdCli.Close(); err != nil {
+			br.lg.Warn("close backend metrics owner cluster client failed", zap.String("cluster", owner.name), zap.Error(err))
+		}
+	}
+}
+
+func (br *BackendReader) snapshotClusterOwners() map[string]*clusterOwner {
+	br.clusterMu.RLock()
+	snapshot := make(map[string]*clusterOwner, len(br.clusterOwners))
+	for name, owner := range br.clusterOwners {
+		snapshot[name] = owner
+	}
+	br.clusterMu.RUnlock()
+	return snapshot
+}
+
+func (br *BackendReader) refreshOwnerState() {
+	snapshot := br.snapshotClusterOwners()
+	for _, owner := range snapshot {
+		if owner != nil && owner.isOwner.Load() {
+			br.isOwner.Store(true)
+			return
+		}
+	}
 	br.isOwner.Store(false)
+}
+
+func (br *BackendReader) clusterOwnerSnapshot() map[string]string {
+	snapshot := br.snapshotClusterOwners()
+	owned := make(map[string]string, len(snapshot))
+	for clusterName, owner := range snapshot {
+		if owner != nil && owner.isOwner.Load() {
+			owned[clusterName] = owner.zone
+		}
+	}
+	return owned
 }
 
 func (br *BackendReader) AddQueryRule(key string, rule QueryRule) {
@@ -161,40 +372,72 @@ func (br *BackendReader) GetQueryResult(key string) QueryResult {
 }
 
 func (br *BackendReader) ReadMetrics(ctx context.Context) error {
-	// If the zone changes, start a new election.
-	cfg := br.cfgGetter.GetConfig()
-	zone := cfg.GetLocation()
-	if zone != br.lastZone {
-		br.lg.Info("zone changed, restart election", zap.String("from", br.lastZone), zap.String("to", zone))
-		br.election.Close()
-		if err := br.initElection(ctx, cfg); err != nil {
-			return err
+	if br.cfgGetter != nil {
+		cfg := br.cfgGetter.GetConfig()
+		if cfg != nil {
+			if err := br.syncClusterOwners(ctx, cfg); err != nil {
+				return err
+			}
 		}
 	}
 
 	// Read from all owners, regardless of whether the owner is a zone owner or global owner.
-	zones, owners, err := br.queryAllOwners(ctx)
+	clusterOwners, err := br.queryClusterOwners(ctx)
 	if err != nil {
 		return err
 	}
 
-	// If self is a owner, read the backends that are not read by any other owners.
 	var errs []error
-	var backendLabels []string
-	if br.isOwner.Load() {
-		if idx := slices.Index(zones, zone); idx >= 0 {
-			zones = slices.Delete(zones, idx, idx+1)
+	backendLabels := make([]string, 0)
+	ownedClusters := br.clusterOwnerSnapshot()
+	if len(ownedClusters) > 0 {
+		for clusterName, zone := range ownedClusters {
+			var excludeZones []string
+			if ownerGroup, ok := clusterOwners[clusterName]; ok {
+				excludeZones = append(excludeZones, ownerGroup.zones...)
+			}
+			if zone != "" {
+				if idx := slices.Index(excludeZones, zone); idx >= 0 {
+					excludeZones = slices.Delete(excludeZones, idx, idx+1)
+				}
+			}
+			clusterLabels, readErr := br.readFromBackendsByCluster(ctx, clusterName, excludeZones)
+			if readErr != nil {
+				errs = append(errs, readErr)
+				continue
+			}
+			backendLabels = append(backendLabels, clusterLabels...)
 		}
-		backendLabels, err = br.readFromBackends(ctx, zones)
-		if err != nil {
-			errs = append(errs, err)
+	} else {
+		// No elected owner yet. Fall back to reading backends directly to avoid empty metrics.
+		hasOwner := false
+		for _, ownerGroup := range clusterOwners {
+			if len(ownerGroup.owners) > 0 {
+				hasOwner = true
+				break
+			}
+		}
+		if !hasOwner {
+			backendLabels, err = br.readFromBackends(ctx, nil)
+			if err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
 
-	for _, owner := range owners {
-		if owner == br.election.ID() {
+	ownerSet := make(map[string]struct{}, len(clusterOwners))
+	for clusterName, ownerGroup := range clusterOwners {
+		if _, owned := ownedClusters[clusterName]; owned {
 			continue
 		}
+		for _, owner := range ownerGroup.owners {
+			if owner == br.ownerID {
+				continue
+			}
+			ownerSet[owner] = struct{}{}
+		}
+	}
+	for owner := range ownerSet {
 		if err = br.readFromOwner(ctx, owner); err != nil {
 			errs = append(errs, err)
 		}
@@ -214,26 +457,53 @@ func (br *BackendReader) ReadMetrics(ctx context.Context) error {
 	return nil
 }
 
-// Query all owners, including zone owner and global owner.
-func (br *BackendReader) queryAllOwners(ctx context.Context) (zones, owners []string, err error) {
-	// Get all owner keys.
+func (br *BackendReader) queryClusterOwners(ctx context.Context) (map[string]ownerGroup, error) {
+	snapshot := br.snapshotClusterOwners()
+	if len(snapshot) == 0 {
+		if br.etcdCli == nil {
+			return map[string]ownerGroup{}, nil
+		}
+		owners, err := br.queryOwnerGroupByPrefix(ctx, br.etcdCli, ownerKeyPrefixForCluster("default"))
+		if err != nil {
+			return nil, err
+		}
+		return map[string]ownerGroup{
+			"default": owners,
+		}, nil
+	}
+	ownerGroups := make(map[string]ownerGroup, len(snapshot))
+	errs := make([]error, 0, len(snapshot))
+	for clusterName, owner := range snapshot {
+		group, err := br.queryOwnerGroupByPrefix(ctx, owner.etcdCli, ownerKeyPrefixForCluster(clusterName))
+		if err != nil {
+			errs = append(errs, errors.Wrapf(err, "query owner of cluster %s failed", clusterName))
+			continue
+		}
+		ownerGroups[clusterName] = group
+	}
+	if len(ownerGroups) == 0 && len(errs) > 0 {
+		return nil, errors.Collect(errors.New("query owner failed"), errs...)
+	}
+	return ownerGroups, nil
+}
+
+func (br *BackendReader) queryOwnerGroupByPrefix(ctx context.Context, etcdCli *clientv3.Client, keyPrefix string) (ownerGroup, error) {
+	if etcdCli == nil {
+		return ownerGroup{}, nil
+	}
 	opts := []clientv3.OpOption{clientv3.WithPrefix()}
-	var kvs []*mvccpb.KeyValue
-	kvs, err = etcd.GetKVs(ctx, br.etcdCli, readerOwnerKeyPrefix, opts, br.electionCfg.Timeout, br.electionCfg.RetryIntvl, br.electionCfg.RetryCnt)
+	kvs, err := etcd.GetKVs(ctx, etcdCli, keyPrefix, opts, br.electionCfg.Timeout, br.electionCfg.RetryIntvl, br.electionCfg.RetryCnt)
 	if err != nil {
-		return
+		return ownerGroup{}, err
 	}
 
 	type ownerInfo struct {
 		addr     string
 		revision int64
 	}
-	// Multiple members campaign for the same owner key, so there exist multiple keys prefixed with the same owner key.
-	// Choose the one with the least create revision for the same zone.
 	ownerMap := make(map[string]ownerInfo)
 	for _, kv := range kvs {
-		key := hack.String(kv.Key)
-		key = key[len(readerOwnerKeyPrefix):]
+		key := strings.TrimPrefix(hack.String(kv.Key), keyPrefix)
 		if len(key) == 0 || key[0] != '/' {
 			continue
 		}
@@ -242,8 +512,10 @@ func (br *BackendReader) queryAllOwners(ctx context.Context) (zones, owners []st
 		var zone string
 		if strings.HasPrefix(key, readerOwnerKeySuffix) {
 			// global owner key, such as "/tiproxy/metric_reader/owner/leaseID"
+			// or "/tiproxy/metric_reader/{cluster}/owner/leaseID"
 		} else if endIdx := strings.Index(key, "/"); endIdx > 0 && strings.HasPrefix(key[endIdx+1:], readerOwnerKeySuffix) {
 			// zonal owner key, such as "/tiproxy/metric_reader/east/owner/leaseID"
+			// or "/tiproxy/metric_reader/{cluster}/east/owner/leaseID"
 			zone = key[:endIdx]
 		} else {
 			continue
@@ -257,17 +529,40 @@ func (br *BackendReader) queryAllOwners(ctx context.Context) (zones, owners []st
 		}
 	}
 
-	owners = make([]string, 0, len(ownerMap))
-	zones = make([]string, 0, len(ownerMap))
+	group := ownerGroup{
+		owners: make([]string, 0, len(ownerMap)),
+		zones:  make([]string, 0, len(ownerMap)),
+	}
 	for zone, info := range ownerMap {
-		if len(zone) > 0 && !slices.Contains(zones, zone) {
-			zones = append(zones, zone)
+		if len(zone) > 0 && !slices.Contains(group.zones, zone) {
+			group.zones = append(group.zones, zone)
 		}
-		if !slices.Contains(owners, info.addr) {
-			owners = append(owners, info.addr)
+		if !slices.Contains(group.owners, info.addr) {
+			group.owners = append(group.owners, info.addr)
 		}
 	}
-	return
+	return group, nil
+}
+
+// Query all owners, including zone owner and global owner.
+func (br *BackendReader) queryAllOwners(ctx context.Context) (zones, owners []string, err error) {
+	ownerGroups, err := br.queryClusterOwners(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, ownerGroup := range ownerGroups {
+		for _, zone := range ownerGroup.zones {
+			if !slices.Contains(zones, zone) {
+				zones = append(zones, zone)
+			}
+		}
+		for _, owner := range ownerGroup.owners {
+			if !slices.Contains(owners, owner) {
+				owners = append(owners, owner)
+			}
+		}
+	}
+	return zones, owners, nil
 }
 
 // If self is a owner, read backends except excludeZones. The backends in those zones are read by other zonal owners.
@@ -279,7 +574,11 @@ func (br *BackendReader) queryAllOwners(ctx context.Context) (zones, owners []st
 // 2. Some backends may not be in the same zone with any owner. E.g. there are only 2 TiProxy in a 3-AZ cluster.
 // In any way, the owner queries the backends that are not queried by other owners.
 func (br *BackendReader) readFromBackends(ctx context.Context, excludeZones []string) ([]string, error) {
-	addrs, err := br.getBackendAddrs(ctx, excludeZones)
+	return br.readFromBackendsByCluster(ctx, "", excludeZones)
+}
+
+func (br *BackendReader) readFromBackendsByCluster(ctx context.Context, clusterName string, excludeZones []string) ([]string, error) {
+	addrs, err := br.getBackendAddrsByCluster(ctx, clusterName, excludeZones)
 	if err != nil {
 		return nil, err
 	}
@@ -546,6 +845,10 @@ func (br *BackendReader) marshalHistory(backends []string) error {
 }
 
 func (br *BackendReader) getBackendAddrs(ctx context.Context, excludeZones []string) ([]backendAddr, error) {
+	return br.getBackendAddrsByCluster(ctx, "", excludeZones)
+}
+
+func (br *BackendReader) getBackendAddrsByCluster(ctx context.Context, clusterName string, excludeZones []string) ([]backendAddr, error) {
 	backends, err := br.backendFetcher.GetTiDBTopology(ctx)
 	if err != nil {
 		br.lg.Error("failed to get backend addresses, stop reading metrics", zap.Error(err))
@@ -554,6 +857,13 @@ func (br *BackendReader) getBackendAddrs(ctx context.Context, excludeZones []str
 	}
 	addrs := make([]backendAddr, 0, len(backends))
 	for _, backend := range backends {
+		backendCluster := backend.Labels[config.ClusterLabelName]
+		if backendCluster == "" {
+			backendCluster = "default"
+		}
+		if clusterName != "" && backendCluster != clusterName {
+			continue
+		}
 		if len(excludeZones) > 0 {
 			if slices.Contains(excludeZones, backend.Labels[config.LocationLabelName]) {
 				continue
@@ -563,22 +873,34 @@ func (br *BackendReader) getBackendAddrs(ctx context.Context, excludeZones []str
 		addrs = append(addrs, backendAddr{
 			statusAddr: statusAddr,
 			label:      getLabel4Addr(statusAddr),
-			cluster:    backend.Labels[config.ClusterLabelName],
+			cluster:    backendCluster,
 		})
 	}
 	return addrs, nil
 }
 
-func (br *BackendReader) PreClose() {
-	if br.election != nil {
-		br.election.Close()
+func (br *BackendReader) closeClusterOwners(closeEtcd bool) {
+	br.clusterMu.Lock()
+	owners := make([]*clusterOwner, 0, len(br.clusterOwners))
+	for _, owner := range br.clusterOwners {
+		owners = append(owners, owner)
 	}
+	if closeEtcd {
+		br.clusterOwners = make(map[string]*clusterOwner)
+	}
+	br.clusterMu.Unlock()
+	for _, owner := range owners {
+		br.closeClusterOwner(owner, closeEtcd)
+	}
+	br.refreshOwnerState()
+}
+
+func (br *BackendReader) PreClose() {
+	br.closeClusterOwners(false)
 }
 
 func (br *BackendReader) Close() {
-	if br.election != nil {
-		br.election.Close()
-	}
+	br.closeClusterOwners(true)
 }
 
 func purgeHistory(history []model.SamplePair, retention time.Duration, now time.Time) []model.SamplePair {

@@ -15,7 +15,6 @@ require (
 	github.com/grpc-ecosystem/go-grpc-middleware v1.4.0
 	github.com/j-keck/arping v1.0.3
 	github.com/klauspost/compress v1.18.0
-	github.com/pelletier/go-toml/v2 v2.2.2
 	github.com/pingcap/kvproto v0.0.0-20250728031536-f08901d17bf4
 	github.com/pingcap/metering_sdk v0.0.0-20250918015914-468cd6feb1dc
 	github.com/pingcap/sysutil v1.0.1-0.20240311050922-ae81ee01f3a5
@@ -201,6 +200,7 @@ require (
 	github.com/opentracing/basictracer-go v1.0.0 // indirect
 	github.com/opentracing/opentracing-go v1.2.0 // indirect
 	github.com/otiai10/copy v1.14.0 // indirect
+	github.com/pelletier/go-toml/v2 v2.2.2 // indirect
 	github.com/petermattis/goid v0.0.0-20240813172612-4fcff4a6cae7 // indirect
 	github.com/pierrec/lz4/v4 v4.1.15 // indirect
 	github.com/pingcap/badger v1.5.1-0.20241015064302-38533b6cbf8d // indirect
