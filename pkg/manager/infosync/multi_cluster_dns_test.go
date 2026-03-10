@@ -227,10 +227,10 @@ func TestMultiClusterFetcherClusterSpecificNSServers(t *testing.T) {
 	clusterB.putTopology(t, "10.2.2.2:4000", &TiDBTopologyInfo{IP: "10.2.2.2", StatusPort: 10080})
 
 	dnsA := newFakeDNSServer(t, map[string]string{
-		"pd-a.test": "127.0.0.1",
+		"pd-a.test.": "127.0.0.1",
 	})
 	dnsB := newFakeDNSServer(t, map[string]string{
-		"pd-b.test": "127.0.0.1",
+		"pd-b.test.": "127.0.0.1",
 	})
 
 	_, portA, err := net.SplitHostPort(clusterA.addr)
@@ -243,12 +243,12 @@ func TestMultiClusterFetcherClusterSpecificNSServers(t *testing.T) {
 	cfg.Proxy.BackendClusters = []config.BackendCluster{
 		{
 			Name:      "cluster-a",
-			PDAddrs:   net.JoinHostPort("pd-a.test", portA),
+			PDAddrs:   net.JoinHostPort("pd-a.test.", portA),
 			NSServers: dnsA.addr(),
 		},
 		{
 			Name:      "cluster-b",
-			PDAddrs:   net.JoinHostPort("pd-b.test", portB),
+			PDAddrs:   net.JoinHostPort("pd-b.test.", portB),
 			NSServers: dnsB.addr(),
 		},
 	}
