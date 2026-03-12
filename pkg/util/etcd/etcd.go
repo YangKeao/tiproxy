@@ -16,6 +16,7 @@ import (
 	"github.com/pingcap/tiproxy/lib/util/errors"
 	"github.com/pingcap/tiproxy/lib/util/retry"
 	"github.com/pingcap/tiproxy/pkg/manager/cert"
+	"github.com/pingcap/tiproxy/pkg/util/dns"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	"go.etcd.io/etcd/client/pkg/v3/transport"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -36,14 +37,94 @@ func InitEtcdClientWithAddrs(logger *zap.Logger, pdAddrs string, tlsConfig *tls.
 }
 
 func InitEtcdClientWithAddrsAndDialer(logger *zap.Logger, pdAddrs string, tlsConfig *tls.Config, dialContext func(context.Context, string) (net.Conn, error)) (*clientv3.Client, error) {
-	if len(strings.TrimSpace(pdAddrs)) == 0 {
+	pdEndpoints := splitAndTrimAddrs(pdAddrs)
+	if len(pdEndpoints) == 0 {
 		// use tidb server addresses directly
 		return nil, nil
 	}
-	pdEndpoints := strings.Split(pdAddrs, ",")
-	for i := range pdEndpoints {
-		pdEndpoints[i] = strings.TrimSpace(pdEndpoints[i])
+	return initEtcdClientWithEndpoints(logger, pdEndpoints, tlsConfig, dialContext)
+}
+
+// InitEtcdClientWithAddrsAndDNSDialer initializes an etcd client with a DNS-aware dialer.
+// If pd-addrs contains host names, they will be expanded to dedicated addresses so gRPC can
+// maintain multiple sub-connections and round-robin among them.
+func InitEtcdClientWithAddrsAndDNSDialer(logger *zap.Logger, pdAddrs string, tlsConfig *tls.Config, d *dns.Dialer) (*clientv3.Client, error) {
+	pdEndpoints := splitAndTrimAddrs(pdAddrs)
+	if len(pdEndpoints) == 0 {
+		return nil, nil
 	}
+	if d == nil {
+		return initEtcdClientWithEndpoints(logger, pdEndpoints, tlsConfig, nil)
+	}
+
+	resolveCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resolvedEndpoints := resolvePDEndpoints(resolveCtx, logger, pdEndpoints, d)
+	return initEtcdClientWithEndpoints(logger, resolvedEndpoints, tlsConfig, d.GRPCDialContext)
+}
+
+func splitAndTrimAddrs(addrs string) []string {
+	parts := strings.Split(addrs, ",")
+	endpoints := make([]string, 0, len(parts))
+	for _, part := range parts {
+		ep := strings.TrimSpace(part)
+		if ep != "" {
+			endpoints = append(endpoints, ep)
+		}
+	}
+	return endpoints
+}
+
+func resolvePDEndpoints(ctx context.Context, logger *zap.Logger, endpoints []string, d *dns.Dialer) []string {
+	resolved := make([]string, 0, len(endpoints))
+	seen := make(map[string]struct{}, len(endpoints))
+	for _, endpoint := range endpoints {
+		host, port, err := net.SplitHostPort(endpoint)
+		if err != nil {
+			if _, ok := seen[endpoint]; !ok {
+				resolved = append(resolved, endpoint)
+				seen[endpoint] = struct{}{}
+			}
+			continue
+		}
+		if net.ParseIP(host) != nil {
+			if _, ok := seen[endpoint]; !ok {
+				resolved = append(resolved, endpoint)
+				seen[endpoint] = struct{}{}
+			}
+			continue
+		}
+
+		ips, err := d.ResolveHost(ctx, host)
+		if err != nil || len(ips) == 0 {
+			logger.Warn("resolve pd endpoint host failed, fallback to original endpoint",
+				zap.String("endpoint", endpoint), zap.Error(err))
+			if _, ok := seen[endpoint]; !ok {
+				resolved = append(resolved, endpoint)
+				seen[endpoint] = struct{}{}
+			}
+			continue
+		}
+		for _, ip := range ips {
+			target := net.JoinHostPort(ip, port)
+			expanded := dns.EncodeResolvedAddress(host, target)
+			if expanded == "" {
+				continue
+			}
+			if _, ok := seen[expanded]; ok {
+				continue
+			}
+			resolved = append(resolved, expanded)
+			seen[expanded] = struct{}{}
+		}
+	}
+	if len(resolved) == 0 {
+		return endpoints
+	}
+	return resolved
+}
+
+func initEtcdClientWithEndpoints(logger *zap.Logger, pdEndpoints []string, tlsConfig *tls.Config, dialContext func(context.Context, string) (net.Conn, error)) (*clientv3.Client, error) {
 	logger.Info("connect ETCD servers", zap.Strings("addrs", pdEndpoints))
 	dialOpts := []grpc.DialOption{
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{

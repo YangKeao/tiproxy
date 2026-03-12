@@ -125,11 +125,11 @@ func (ms *MultiClusterInfoSyncer) syncClusters(ctx context.Context, cfg *config.
 			continue
 		}
 
-		etcdCli, err := etcd.InitEtcdClientWithAddrsAndDialer(
+		etcdCli, err := etcd.InitEtcdClientWithAddrsAndDNSDialer(
 			ms.lg.With(zap.String("cluster", cluster.Name)),
 			cluster.PDAddrs,
 			ms.clusterTLS(),
-			d.GRPCDialContext,
+			d,
 		)
 		if err != nil {
 			if ok {

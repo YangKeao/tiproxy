@@ -6,6 +6,7 @@ package dns
 import (
 	"context"
 	"net"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,8 +18,10 @@ import (
 )
 
 const (
-	defaultDNSPort  = "53"
-	defaultCacheTTL = 30 * time.Second
+	defaultDNSPort       = "53"
+	defaultCacheTTL      = 30 * time.Second
+	resolvedAddrScheme   = "tiproxy-resolved"
+	resolvedAddrPathPref = "/"
 )
 
 type cacheEntry struct {
@@ -78,6 +81,9 @@ func (d *Dialer) GRPCDialContext(ctx context.Context, address string) (net.Conn,
 }
 
 func (d *Dialer) DialContext(ctx context.Context, network, address string, timeout time.Duration) (net.Conn, error) {
+	if target, ok := ParseResolvedAddress(address); ok {
+		return d.directDial(ctx, network, target, timeout)
+	}
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
 		return nil, errors.WithStack(err)
@@ -150,6 +156,41 @@ func (d *Dialer) resolveHost(ctx context.Context, host string) ([]string, error)
 	}
 	d.mu.Unlock()
 	return addrs, nil
+}
+
+func (d *Dialer) ResolveHost(ctx context.Context, host string) ([]string, error) {
+	if net.ParseIP(host) != nil {
+		return []string{host}, nil
+	}
+	return d.resolveHost(ctx, host)
+}
+
+func EncodeResolvedAddress(serverName, target string) string {
+	serverName = strings.TrimSpace(serverName)
+	target = strings.TrimSpace(target)
+	if serverName == "" || target == "" {
+		return ""
+	}
+	return (&url.URL{
+		Scheme: resolvedAddrScheme,
+		Host:   serverName,
+		Path:   resolvedAddrPathPref + target,
+	}).String()
+}
+
+func ParseResolvedAddress(address string) (string, bool) {
+	u, err := url.Parse(address)
+	if err != nil || !strings.EqualFold(u.Scheme, resolvedAddrScheme) {
+		return "", false
+	}
+	target := strings.TrimSpace(strings.TrimPrefix(u.Path, resolvedAddrPathPref))
+	if target == "" {
+		return "", false
+	}
+	if _, _, err := net.SplitHostPort(target); err != nil {
+		return "", false
+	}
+	return target, true
 }
 
 func ParseNSServers(nsServers string) ([]string, error) {

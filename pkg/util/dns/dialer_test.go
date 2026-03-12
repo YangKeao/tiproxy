@@ -62,3 +62,31 @@ func TestClusterDialerManagerUpdateConfig(t *testing.T) {
 	require.NotNil(t, dialer)
 	require.Equal(t, []string{"10.0.0.1:53", "10.0.0.2:1053"}, dialer.nsServers)
 }
+
+func TestResolvedAddressEncoding(t *testing.T) {
+	encoded := EncodeResolvedAddress("pd-a.test", "127.0.0.1:2379")
+	require.Equal(t, "tiproxy-resolved://pd-a.test/127.0.0.1:2379", encoded)
+
+	target, ok := ParseResolvedAddress(encoded)
+	require.True(t, ok)
+	require.Equal(t, "127.0.0.1:2379", target)
+
+	_, ok = ParseResolvedAddress("127.0.0.1:2379")
+	require.False(t, ok)
+}
+
+func TestDialContextResolvedAddress(t *testing.T) {
+	d, err := NewDialer(zap.NewNop(), "")
+	require.NoError(t, err)
+
+	dialed := ""
+	d.dialCtx = func(ctx context.Context, network, address string) (net.Conn, error) {
+		dialed = address
+		return nil, context.DeadlineExceeded
+	}
+
+	encoded := EncodeResolvedAddress("pd-a.test", "127.0.0.1:2379")
+	_, err = d.DialContext(context.Background(), "tcp", encoded, 0)
+	require.Error(t, err)
+	require.Equal(t, "127.0.0.1:2379", dialed)
+}

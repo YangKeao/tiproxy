@@ -270,11 +270,11 @@ func initClusterEtcdClient(lg *zap.Logger, cluster config.BackendCluster, certMg
 	if err != nil {
 		return nil, err
 	}
-	return etcd.InitEtcdClientWithAddrsAndDialer(
+	return etcd.InitEtcdClientWithAddrsAndDNSDialer(
 		lg.With(zap.String("cluster", cluster.Name)),
 		cluster.PDAddrs,
 		certMgr.ClusterTLS(),
-		d.GRPCDialContext,
+		d,
 	)
 }
 

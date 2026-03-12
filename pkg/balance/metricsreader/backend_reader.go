@@ -199,11 +199,11 @@ func (br *BackendReader) newClusterOwner(ctx context.Context, cluster config.Bac
 	if err != nil {
 		return nil, err
 	}
-	etcdCli, err := etcd.InitEtcdClientWithAddrsAndDialer(
+	etcdCli, err := etcd.InitEtcdClientWithAddrsAndDNSDialer(
 		br.lg.With(zap.String("cluster", cluster.Name)),
 		cluster.PDAddrs,
 		br.clusterTLS(),
-		d.GRPCDialContext,
+		d,
 	)
 	if err != nil {
 		return nil, err

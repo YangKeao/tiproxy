@@ -126,11 +126,11 @@ func (mcf *MultiClusterFetcher) syncClusters(cfg *config.Config) error {
 			continue
 		}
 
-		etcdCli, err := etcd.InitEtcdClientWithAddrsAndDialer(
+		etcdCli, err := etcd.InitEtcdClientWithAddrsAndDNSDialer(
 			mcf.lg.With(zap.String("cluster", cluster.Name)),
 			cluster.PDAddrs,
 			mcf.clusterTLS(),
-			d.GRPCDialContext,
+			d,
 		)
 		if err != nil {
 			if ok {
