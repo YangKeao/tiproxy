@@ -1,31 +1,32 @@
-# Tech Spec: TiProxy Multi-PD Clusters Support (Final)
+# Tech Spec: TiProxy Multi-PD Clusters Support
 
 - Author(s): [Yang Keao](https://github.com/YangKeao)
-- Status: Implemented
+- Status: Design Baseline
 - Last Updated: 2026-03-13
 - Supersedes: `docs/design/2026-03-10-multi-cluster-port-routing.md`
 
 ## 1. Background and Goals
 
-This project enables one TiProxy instance to concurrently serve multiple independent PD/TiDB clusters, while keeping routing isolation and online configurability.
+This design allows one TiProxy instance to serve multiple independent PD/TiDB clusters while preserving strict routing isolation and online reconfiguration.
 
-Primary goals:
+Goals:
 - Keep backward compatibility with legacy single `proxy.pd-addrs`.
+- Support multi-cluster discovery from `proxy.backend-clusters`.
 - Support dynamic add/remove/update of backend clusters via existing config API.
 - Support port-based routing (`balance.routing-rule = "port"`) with multi-listener `proxy.port-range`.
 - Ensure rebalance and connection migration stay within the same routing group.
-- Support per-cluster DNS routing via `ns-servers` for PD/etcd, TiDB HTTP, and backend MySQL connection paths.
-- Improve etcd DNS HA when `pd-addrs` uses domain names (including headless-service style multi-IP results).
+- Support per-cluster DNS routing via `ns-servers`.
+- Improve etcd availability when `pd-addrs` uses DNS names (including headless-service style multi-IP responses).
 
 ## 2. Non-Goals
 
 - Cross-port-group migration.
-- Making `proxy.port-range` or `balance.routing-rule` reloadable.
-- Introducing a patch-style config API for append/remove delta updates.
+- Reloading `proxy.port-range` or `balance.routing-rule` at runtime.
+- Patch-style (append/remove delta) config API for cluster list updates.
 
 ## 3. Configuration Model
 
-### 3.1 Backend cluster list
+### 3.1 Backend Clusters
 
 ```toml
 [[proxy.backend-clusters]]
@@ -39,12 +40,12 @@ pd-addrs = "10.0.2.1:2379,10.0.2.2:2379"
 ns-servers = "10.20.0.2,10.20.0.3:53"
 ```
 
-Validation rules:
-- `name`: non-empty, unique.
-- `pd-addrs`: non-empty `host:port` list.
-- `ns-servers`: optional `host[:port]` list, default port `53`.
+Validation:
+- `name` must be non-empty and unique.
+- `pd-addrs` must be a non-empty list of `host:port`.
+- `ns-servers` is optional; each item must be `host[:port]`, with default port `53`.
 
-### 3.2 Port-based routing
+### 3.2 Port-Based Routing
 
 ```toml
 [proxy]
@@ -56,256 +57,279 @@ routing-rule = "port"
 ```
 
 Behavior:
-- `proxy.port-range` expands one frontend host into many listening ports.
+- `port-range` expands one frontend host into multiple listening ports.
 - route group key is TiDB label `tiproxy-port`.
-- connection arriving at TiProxy port `P` is routed only to TiDB(s) labeled `tiproxy-port=P`.
+- a connection arriving at TiProxy port `P` is routed only to TiDB nodes labeled `tiproxy-port=P`.
 
-### 3.3 Backward compatibility and precedence
+### 3.3 Compatibility and Precedence
 
 Resolution order:
 1. If `proxy.backend-clusters` is non-empty, use it.
 2. Else if `proxy.pd-addrs` is non-empty, synthesize one implicit cluster named `default`.
-3. Else no backend cluster is active (startup allowed).
+3. Else run with zero backend clusters and wait for dynamic config updates.
 
-So when both are present, `backend-clusters` takes precedence.
+If both `proxy.pd-addrs` and `proxy.backend-clusters` are present, `backend-clusters` takes precedence.
 
 ## 4. Runtime Architecture
 
-### 4.1 Multi-cluster topology fetcher
+### 4.1 Multi-Cluster Topology Fetcher
 
-`MultiClusterFetcher` (`pkg/manager/infosync/multi_cluster.go`):
+`MultiClusterFetcher`:
 - owns one etcd client per backend cluster,
 - watches config channel and supports add/update/remove,
-- merges topology from all clusters,
+- merges TiDB topology from all clusters,
 - injects synthetic label `tiproxy-cluster=<cluster-name>`.
 
 Duplicate TiDB address across clusters is logged and first-seen entry is kept.
 
-### 4.2 Multi-cluster infosync
+### 4.2 Multi-Cluster InfoSync
 
-`MultiClusterInfoSyncer` (`pkg/manager/infosync/multi_cluster_infosync.go`):
+`MultiClusterInfoSyncer`:
 - owns one `InfoSyncer` per backend cluster,
-- each syncer writes TiProxy topology into that cluster's PD/etcd,
-- dynamic add/remove/update is supported.
+- writes TiProxy topology into each cluster's PD/etcd,
+- applies dynamic add/remove/update.
 
-### 4.3 Cluster-scoped metrics owner election
+### 4.3 Cluster-Scoped Metrics Owner Election
 
-`BackendReader` (`pkg/balance/metricsreader/backend_reader.go`):
-- builds one election context per backend cluster,
-- each cluster has independent etcd client and owner key space,
-- owner key prefix is cluster-scoped (`/tiproxy/metric_reader/<cluster>/...`, default cluster keeps historical path compatibility).
+`BackendReader`:
+- creates one election context per backend cluster,
+- uses independent etcd clients and key spaces per cluster,
+- keeps historical key-path compatibility for the single-cluster default path.
 
-### 4.4 Routing and rebalance
+### 4.4 Routing and Rebalance Scope
 
-Router grouping under `routing-rule=port` ensures:
-- route selection only within matching `tiproxy-port` group,
-- rebalance/migration (`Group.Balance`) only inside same group,
-- no cross-group movement by design.
+With `routing-rule=port`:
+- route selection is constrained to the matching `tiproxy-port` group,
+- rebalance/migration is constrained to the same group,
+- cross-group migration is not allowed.
 
-### 4.5 VIP behavior
+### 4.5 VIP Rule
 
-VIP is enabled only when backend cluster count is exactly 1.
-For multi-cluster mode, VIP is disabled intentionally.
+VIP is enabled only when backend cluster count is exactly `1`.
+For multi-cluster mode, VIP is disabled.
 
 ## 5. DNS and etcd HA Design
 
-### 5.1 Per-cluster DNS dialer
+### 5.1 Per-Cluster DNS Dialer
 
 `dns.Dialer` provides:
-- custom resolver bound to configured `ns-servers`,
-- round-robin DNS server selection,
-- in-process host cache (default TTL 30s),
-- direct IP bypass when target host is already IP.
+- cluster-specific resolver bound to `ns-servers`,
+- round-robin selection among configured DNS servers,
+- in-process host cache,
+- direct-IP fast path when target host is already an IP.
 
-When `ns-servers` is empty, system default DNS path is used.
+If `ns-servers` is empty, default system DNS behavior is used.
 
-### 5.2 DNS-expanded etcd endpoints (new)
+### 5.2 DNS-Expanded etcd Endpoints
 
 Problem:
-- etcd client v3 uses an internal manual resolver (`etcd-endpoints`) with `round_robin`.
-- if only one domain endpoint is provided, gRPC sub-conn granularity remains one endpoint.
+- etcd client v3 uses a manual resolver + `round_robin` over configured endpoints.
+- if only one DNS endpoint is configured, gRPC endpoint granularity may stay too coarse.
 
-Implemented solution:
-- Added `InitEtcdClientWithAddrsAndDNSDialer` (`pkg/util/etcd/etcd.go`).
-- During etcd client initialization:
-  1. parse `pd-addrs` list,
-  2. for domain host entries, resolve via cluster-specific `dns.Dialer`,
-  3. expand one domain endpoint into multiple resolved endpoints (one per IP),
-  4. encode each as `tiproxy-resolved://<original-host>/<ip:port>`.
-- `dns.Dialer` recognizes this encoded endpoint and dials `<ip:port>` directly.
+Design:
+- for each `pd-addrs` DNS endpoint, resolve host via cluster-specific `dns.Dialer`.
+- expand one endpoint into multiple resolved endpoints (one per IP).
+- encode expanded endpoint as `tiproxy-resolved://<origin-host>/<ip:port>`.
+- `dns.Dialer` recognizes this encoded form and dials `<ip:port>` directly.
 
 Effect:
-- etcd manual resolver now receives multiple explicit addresses,
-- gRPC `round_robin` can maintain multiple sub-connections for better availability.
+- gRPC receives multiple explicit endpoints.
+- `round_robin` can maintain multiple sub-connections and improve availability.
 
 Fallback:
-- if domain resolve fails during expansion, keep original endpoint and continue.
+- if host resolution fails during expansion, keep original endpoint and continue.
 
 ## 6. Dynamic Reconfiguration Semantics
 
-Config updates reuse existing API (`/api/admin/config/`) with full-list replacement semantics for `proxy.backend-clusters`.
+Config updates reuse `/api/admin/config/` with full-list replacement for `proxy.backend-clusters`.
 
 Rules:
-- update payload containing `proxy.backend-clusters` replaces old list,
-- runtime watchers apply add/update/remove incrementally,
-- if a specific cluster update fails, previous runtime instance for that cluster is retained when possible,
+- payload containing `proxy.backend-clusters` replaces previous list.
+- runtime managers apply add/update/remove incrementally.
+- update failures are isolated to impacted clusters when possible.
 - removed clusters are closed and cleaned up.
 
 ## 7. Operational Invariants
 
 - Port isolation: traffic to port `P` never routes to `tiproxy-port != P`.
-- Cluster isolation: owner election and infosync are cluster-scoped.
-- Dynamic safety: partial invalid update does not globally break existing healthy cluster clients.
-- Backward compatibility: legacy single `pd-addrs` behavior remains available.
+- Cluster isolation: infosync and metrics-owner election are cluster-scoped.
+- Dynamic safety: config changes should not force process restart.
+- Compatibility: legacy single-cluster behavior is preserved.
 
-## 8. Known Limitations
+## 8. Known Constraints
 
-- `proxy.port-range` and `balance.routing-rule` remain non-reloadable.
-- `backend-clusters` API is replacement, not delta patch.
-- If `ns-servers` host itself is a domain, first-hop resolution of that DNS server may still rely on system resolver.
-- DNS-expanded endpoints are applied when cluster client is (re)built; further endpoint evolution still depends on etcd auto-sync/member list behavior.
+- `proxy.port-range` and `balance.routing-rule` are non-reloadable.
+- `backend-clusters` API uses replacement semantics.
+- if a DNS server entry itself is a domain name, first-hop resolution of that DNS server endpoint may depend on system resolver.
 
-## 9. Observability
+## 9. Observability Requirements
 
-Expected key logs:
-- `added/updated/removed backend cluster`
-- `added/updated/removed infosync backend cluster`
-- `added/updated/removed backend metrics owner cluster`
-- DNS config and resolve failures with cluster name context.
+Logs should include cluster identifiers for:
+- cluster add/update/remove,
+- DNS resolve failures,
+- etcd client creation failures,
+- owner election transitions.
 
-Recommended metrics to watch:
-- route/connection metrics per port group,
-- migration counters and reasons,
-- backend availability and health-check metrics.
+Metrics should expose:
+- per-group routing/connection distribution,
+- migration counts and reasons,
+- backend health status.
 
 ---
 
-# Test Plan
+# Test Plan (From Scratch)
 
-## A. Test Scope
+## A. Test Strategy and Principles
 
-Cover three layers:
-- unit tests for parser/dialer/resolver behaviors,
-- integration tests for multi-cluster runtime wiring,
-- end-to-end and failure-injection tests for availability and corner cases.
+- Build tests in three layers: unit, integration, end-to-end.
+- Treat each cluster as an independent failure domain.
+- Verify both functional correctness and failure behavior.
+- Prefer deterministic tests first, then stress/fault tests.
+- Every test should assert at least one hard invariant.
 
-## B. Existing Automated Coverage (Implemented)
+## B. Test Environment Matrix
 
-### B.1 DNS and etcd
+1. Local deterministic environment
+- embedded etcd servers,
+- fake DNS servers,
+- mock TiDB topology/health endpoints.
 
-- `pkg/util/dns/dialer_test.go`
-  - `TestResolvedAddressEncoding`
-  - `TestDialContextResolvedAddress`
-  - resolver cache and config update tests.
+2. Real-process integration environment
+- `tiup playground` for multi-PD/TiKV clusters,
+- manually started TiDB instances with explicit labels.
 
-- `pkg/util/etcd/etcd_test.go`
-  - `TestEtcdClientWithDNSDialerExpandedEndpoints`
-    - fake DNS server,
-    - domain `pd-addrs` resolved through configured DNS,
-    - endpoint expansion and successful etcd put verification.
+3. Fault-injection environment
+- controllable DNS failures (NXDOMAIN, timeout, partial answer),
+- PD endpoint process kill/restart,
+- network drop/delay via traffic control.
 
-### B.2 Multi-cluster infosync/fetcher
+## C. Core Invariants to Assert
 
-- `pkg/manager/infosync/multi_cluster_test.go`
-  - dynamic add/remove/update cluster fetch behavior.
+1. `routing-rule=port`: request on port `P` only reaches backends with `tiproxy-port=P`.
+2. Rebalance never migrates connection across different `tiproxy-port` groups.
+3. Cluster add/remove/update via config API takes effect online.
+4. Cluster-scoped infosync and owner-election keys are written only to the intended PD cluster.
+5. Per-cluster `ns-servers` drives PD/TiDB hostname resolution path.
+6. With DNS-expanded PD endpoints, single-endpoint domain can survive partial IP failure.
 
-- `pkg/manager/infosync/multi_cluster_infosync_test.go`
-  - dynamic infosync add/remove.
-  - `TestMultiClusterInfoSyncerResolvePDAddrsWithClusterNSServers`.
+## D. Unit Test Design
 
-- `pkg/manager/infosync/multi_cluster_dns_test.go`
-  - fake DNS split-routing assertions per cluster.
+### D.1 Config and Validation
 
-### B.3 Server and metrics owner
+- valid/invalid `backend-clusters` parsing.
+- duplicate cluster name rejection.
+- empty cluster name rejection.
+- invalid `pd-addrs` / invalid `ns-servers` formats.
+- precedence when both legacy and new configs are present.
 
-- `pkg/balance/metricsreader` tests validate cluster owner logic compile and behavior.
-- `pkg/server` tests validate startup wiring and config compatibility paths.
+### D.2 DNS Dialer
 
-## C. Functional Test Matrix
+- parse and normalize `ns-servers`.
+- host resolve cache behavior and TTL refresh.
+- round-robin DNS server selection.
+- encoded resolved-address parsing and direct dial path.
+- fallback behavior when resolve fails.
 
-### C.1 Basic feature tests
+### D.3 Endpoint Expansion Logic
 
-1. Legacy compatibility
-- Only `proxy.pd-addrs` configured.
-- Expect one implicit `default` cluster and normal routing.
+- split and normalize `pd-addrs` list.
+- domain endpoint expansion to multiple resolved addresses.
+- dedup behavior for repeated IPs.
+- mixed input (IP endpoints + DNS endpoints).
+- fallback to original endpoint when expansion fails.
 
-2. Pure multi-cluster startup
-- `proxy.pd-addrs = ""`, only `backend-clusters` configured.
-- Expect all cluster clients created and topology merged.
+## E. Integration Test Design
 
-3. Empty startup then dynamic add
-- start with empty `backend-clusters`.
-- add clusters via API; expect traffic starts working without restart.
+### E.1 Multi-Cluster Fetch and InfoSync
 
-4. Dynamic remove
-- remove one cluster via API.
-- expect removed cluster no longer appears in topology/owner keys.
+- startup with empty backend list.
+- dynamic add single cluster, then multiple clusters.
+- dynamic remove one cluster, then all clusters.
+- dynamic update of `pd-addrs` and `ns-servers`.
+- verify topology merge labels (`tiproxy-cluster`) and isolation.
 
-5. Port routing correctness
-- multiple TiDB labeled `tiproxy-port=10000/10001/...`.
-- connect each port repeatedly; expect only matching backend set.
+### E.2 Metrics Owner Isolation
 
-6. Rebalance boundary
-- force load imbalance inside one port group.
-- verify migrations stay in same `tiproxy-port` group.
+- owner election keys are cluster-scoped.
+- owner transitions per cluster are independent.
+- one cluster failure does not block owner activity in another cluster.
 
-### C.2 DNS route tests
+### E.3 DNS Routing by Cluster
 
-1. Per-cluster DNS split
-- cluster-a and cluster-b use distinct fake DNS servers.
-- verify PD and TiDB hostnames are queried only on owning DNS server.
+- two fake DNS servers with disjoint records.
+- `cluster-a` and `cluster-b` use different `ns-servers`.
+- verify PD/TiDB hostname queries hit only assigned DNS server.
 
-2. ns-servers omitted
-- leave `ns-servers` empty.
-- verify default resolver path still works.
+### E.4 etcd DNS HA
 
-3. ns-servers invalid update
-- push invalid ns server value.
-- verify update rejected or old runtime instance retained.
+- one PD domain returns multiple A records.
+- establish client with expanded endpoints.
+- kill one resolved target and verify operations continue.
+- restore target and verify no regression.
 
-## D. Availability and Resilience Tests
+## F. End-to-End Test Design
 
-1. Headless-service multi-IP PD endpoint
-- one `pd-addrs` domain resolves to N IPs.
-- kill one target PD IP endpoint.
-- expect client still healthy via remaining expanded endpoints/sub-conns.
+### F.1 Port Routing E2E
 
-2. DNS server partial outage
-- one cluster DNS unavailable, others healthy.
-- expect affected cluster degradation only; unrelated clusters unaffected.
+- run two independent TiDB clusters.
+- run multiple TiDB instances per cluster, each with explicit `tiproxy-port` labels.
+- open long-running client sessions on multiple TiProxy ports.
+- assert each session stays within its port group.
 
-3. PD cluster full outage and recovery
-- stop one PD cluster then recover.
-- verify TiProxy recovers without restart after PD available again.
+### F.2 Dynamic API E2E
 
-4. Runtime cluster churn under load
-- run sustained SQL traffic, repeatedly add/remove clusters via API.
-- assert no panic, no cross-port routing, acceptable error envelope during transition.
+- start TiProxy with no backend clusters.
+- add clusters via API while traffic is running.
+- remove/update clusters via API while traffic is running.
+- verify expected success/failure envelope and no crash.
 
-## E. Corner Cases
+### F.3 Rebalance E2E
 
-1. Duplicate cluster names in config.
-2. Empty cluster name.
-3. Invalid `pd-addrs` entry format.
-4. `backend-clusters` and `pd-addrs` both present (verify precedence).
-5. Duplicate TiDB addr appears from different clusters (first-kept + warning).
-6. TiDB missing `tiproxy-port` label under `routing-rule=port`.
-7. Very large `port-range` with sparse backend labels.
-8. Cluster update where PD addrs changed but DNS unchanged (and vice versa).
-9. Simultaneous config updates racing with reader/syncer refresh loops.
+- induce load skew within one port group.
+- verify migration is triggered only within that group.
+- verify migration is blocked or skipped cleanly when redirect preconditions are absent.
 
-## F. Performance and Scale (Recommended)
+## G. Resilience and Fault Tests
 
-1. 100+ listening ports with `routing-rule=port`.
-2. 10+ backend clusters with periodic config churn.
-3. DNS query rate and cache hit ratio under high connect churn.
-4. etcd connection count/sub-conn growth after endpoint expansion.
+1. DNS server timeout for one cluster.
+2. DNS NXDOMAIN for PD host.
+3. PD quorum loss in one cluster.
+4. Intermittent network failures to subset of PD IPs.
+5. Rapid repeated config updates (churn) under active traffic.
+6. simultaneous failures in one cluster while another remains healthy.
 
-## G. Acceptance Criteria
+Expected outcome: degradation is localized; unaffected clusters continue serving.
 
-- No regression in single-cluster legacy mode.
-- Multi-cluster add/remove/update works online without process restart.
-- Port routing and rebalance isolation are invariant.
-- Cluster-scoped infosync and metrics owner election are correct.
-- DNS split-routing is provable in automated tests.
-- Lint and relevant package tests pass.
+## H. Corner Cases
+
+1. `backend-clusters` empty at boot, later populated.
+2. duplicate TiDB address across clusters.
+3. TiDB without `tiproxy-port` label under port-routing mode.
+4. very large `port-range` with sparse backend labels.
+5. cluster update that changes only DNS settings.
+6. cluster update that changes only PD endpoints.
+7. invalid config push followed by valid recovery push.
+8. mixed IPv4/IPv6 DNS answers.
+9. DNS answer reordering across repeated queries.
+
+## I. Performance and Scale Plan
+
+1. high number of frontend listening ports.
+2. high number of backend clusters.
+3. high connect churn with DNS-heavy workloads.
+4. long-duration soak test with periodic cluster add/remove.
+
+Measure:
+- connection success rate,
+- latency percentiles,
+- migration rates,
+- DNS lookup volume and cache hit ratio,
+- etcd client/sub-connection stability.
+
+## J. Release Gates
+
+1. All unit and integration suites pass.
+2. End-to-end routing and dynamic update scenarios pass.
+3. Fault-injection suite meets availability expectations.
+4. No cross-port routing violations in any run.
+5. Lint and CI checks pass.
