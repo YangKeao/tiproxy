@@ -300,7 +300,47 @@ Metrics should expose:
 
 Expected outcome: degradation is localized; unaffected clusters continue serving.
 
-## H. Corner Cases
+## H. Failover Acceptance Matrix
+
+### H.1 Global Failover Acceptance Rules
+
+For every failover scenario below, all rules must hold:
+- fault isolation: one cluster failure must not cascade to healthy clusters.
+- routing isolation: no request or migration may cross `tiproxy-port` groups.
+- recoverability: after fault removal, service recovers without TiProxy restart.
+- observability: logs and metrics must clearly show fault and recovery transitions with cluster context.
+
+### H.2 Scenario Matrix
+
+| ID | Fault Scenario | Injection Method | Expected Results |
+|---|---|---|---|
+| FO-01 | one PD endpoint down, other PD endpoints healthy in same cluster | stop one PD process | cluster remains available with short transient retry; healthy clusters unaffected |
+| FO-02 | headless PD hostname resolves to multiple IPs, one IP unreachable | block one resolved IP | etcd requests continue via remaining resolved endpoints; no restart required |
+| FO-03 | all PD endpoints unreachable in one cluster | stop all PD endpoints for that cluster | only that cluster degrades; other clusters continue to serve traffic |
+| FO-04 | PD leader change | trigger leader transfer or kill PD leader | short control-plane blip only; topology/election loops recover automatically |
+| FO-05 | cluster-specific DNS server timeout | drop packets to one cluster's `ns-servers` | only that cluster's new DNS-dependent operations fail/slow down; other clusters unaffected |
+| FO-06 | cluster-specific DNS returns NXDOMAIN for PD host | fake DNS returns NXDOMAIN | target cluster fails PD resolve with explicit errors; no cross-cluster fallback |
+| FO-07 | DNS high latency and packet loss | inject DNS latency/loss | service degrades gracefully with retries; no panic/deadlock |
+| FO-08 | DNS answer set changes (A-record rotation) | replace DNS A records while running | after cache window, client reconnects through new addresses and resumes steady state |
+| FO-09 | dynamic remove of one backend cluster under load | update config API to remove cluster | removed cluster stops receiving new requests; remaining clusters continue normally |
+| FO-10 | dynamic add of a new backend cluster under load | update config API to add cluster | new cluster becomes discoverable and routable online; existing traffic unaffected |
+| FO-11 | dynamic update of `ns-servers` | API update on one cluster | subsequent DNS lookups use new nameservers; no global traffic interruption |
+| FO-12 | dynamic update of `pd-addrs` | API change `pd-addrs` on one cluster | control plane converges to new PD endpoints online; no process restart |
+| FO-13 | all TiDB instances in one `tiproxy-port` group down | stop all TiDB with same label | only that ingress port becomes unavailable; other ports continue serving |
+| FO-14 | partial TiDB failure within one `tiproxy-port` group | stop subset of TiDB in group | routing continues within same group using surviving TiDB nodes |
+| FO-15 | migration target disappears during rebalance | kill target TiDB mid-migration | migration fails safely/retries; no cross-group migration side effect |
+| FO-16 | config churn storm | rapid repeated add/remove/update via API | no panic or deadlock; runtime converges to last accepted config |
+| FO-17 | one cluster in persistent fault while another cluster under stress traffic | keep cluster-a faulty, stress cluster-b | cluster-b SLA remains within threshold; cluster-a failure remains isolated |
+| FO-18 | TiProxy process restart during mixed cluster health state | restart TiProxy while one cluster degraded | startup succeeds; healthy clusters recover serving path first; degraded cluster remains isolated until dependency recovers |
+
+### H.3 Hard Assertions for Every Failover Run
+
+- Any accepted backend for a connection on ingress port `P` must satisfy `tiproxy-port=P`.
+- Any migration event must keep source and target inside the same route group.
+- During a single-cluster failure, healthy clusters must keep successful request ratio above agreed SLO threshold.
+- Fault and recovery phases must be visible in logs with `cluster` and component identifiers.
+
+## I. Corner Cases
 
 1. `backend-clusters` empty at boot, later populated.
 2. duplicate TiDB address across clusters.
@@ -312,7 +352,7 @@ Expected outcome: degradation is localized; unaffected clusters continue serving
 8. mixed IPv4/IPv6 DNS answers.
 9. DNS answer reordering across repeated queries.
 
-## I. Performance and Scale Plan
+## J. Performance and Scale Plan
 
 1. high number of frontend listening ports.
 2. high number of backend clusters.
@@ -326,7 +366,7 @@ Measure:
 - DNS lookup volume and cache hit ratio,
 - etcd client/sub-connection stability.
 
-## J. Release Gates
+## K. Release Gates
 
 1. All unit and integration suites pass.
 2. End-to-end routing and dynamic update scenarios pass.
