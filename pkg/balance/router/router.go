@@ -197,6 +197,14 @@ func (b *backendWrapper) Cidr() []string {
 	return cidrs
 }
 
+func (b *backendWrapper) TiProxyPort() string {
+	labels := b.getHealth().Labels
+	if len(labels) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(labels[config.TiProxyPortLabelName])
+}
+
 func (b *backendWrapper) String() string {
 	b.mu.RLock()
 	str := b.mu.String()

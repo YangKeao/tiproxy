@@ -74,6 +74,8 @@ func (r *ScoreBasedRouter) Init(ctx context.Context, ob observer.BackendObserver
 		r.matchType = MatchClientCIDR
 	case config.MatchProxyCIDRStr:
 		r.matchType = MatchProxyCIDR
+	case config.MatchPortStr:
+		r.matchType = MatchPort
 	case "":
 	default:
 		r.logger.Error("unsupported routing rule, use the default rule", zap.String("rule", cfg.Balance.RoutingRule))
@@ -278,13 +280,32 @@ func (router *ScoreBasedRouter) updateGroups() {
 				}
 				// maybe too many logs, ignore the error now
 			}
+		case MatchPort:
+			port := backend.TiProxyPort()
+			if port == "" {
+				break
+			}
+			values := []string{port}
+			for _, g := range router.groups {
+				if g.EqualValues(values) {
+					group = g
+					break
+				}
+			}
+			if group == nil {
+				g, err := NewGroup(values, router.bpCreator, router.matchType, router.logger)
+				if err == nil {
+					group = g
+					router.groups = append(router.groups, group)
+				}
+			}
 		}
 		if group != nil {
 			group.AddBackend(backend.addr, backend)
 		}
 	}
 	for _, group := range router.groups {
-		group.RefreshCidr()
+		group.RefreshValues()
 	}
 }
 

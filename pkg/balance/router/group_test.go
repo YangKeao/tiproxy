@@ -109,7 +109,17 @@ func TestMatchIP(t *testing.T) {
 	}
 }
 
-func TestRefreshCidr(t *testing.T) {
+func TestMatchPort(t *testing.T) {
+	lg, _ := logger.CreateLoggerForTest(t)
+	g, err := NewGroup([]string{"10080"}, nopBpCreator, MatchPort, lg)
+	require.NoError(t, err)
+
+	require.True(t, g.Match(ClientInfo{ListenerAddr: "127.0.0.1:10080"}))
+	require.False(t, g.Match(ClientInfo{ListenerAddr: "127.0.0.1:10081"}))
+	require.False(t, g.Match(ClientInfo{ListenerAddr: "bad-addr"}))
+}
+
+func TestRefreshValues(t *testing.T) {
 	tests := []struct {
 		cidrs1    []string
 		cidrs2    []string
@@ -167,7 +177,7 @@ func TestRefreshCidr(t *testing.T) {
 		b2.mu.BackendHealth.Labels = map[string]string{config.CidrLabelName: strings.Join(test.cidrs2, ",")}
 		g1.AddBackend("1", b1)
 		g1.AddBackend("2", b2)
-		g1.RefreshCidr()
+		g1.RefreshValues()
 		require.True(t, g1.EqualValues(test.final))
 		require.Equal(t, len(g1.values), len(g1.cidrList))
 	}
