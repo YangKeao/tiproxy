@@ -45,6 +45,7 @@ type Server struct {
 	clusterManager   *backendcluster.Manager
 	vipManager       vip.VIPManager
 	metricsReader    metricsreader.MetricsReader
+	metricsQuerier   *backendcluster.MetricsQuerier
 	replay           mgrrp.JobManager
 	meter            *meter.Meter
 	memManager       *memory.MemManager
@@ -111,11 +112,10 @@ func NewServer(ctx context.Context, sctx *sctx.Context) (srv *Server, err error)
 	if err = srv.clusterManager.Start(ctx, srv.configManager, srv.configManager.WatchConfig()); err != nil {
 		return
 	}
-	var promFetcher metricsreader.PromInfoFetcher
 	if cluster := srv.clusterManager.PrimaryCluster(); cluster != nil {
 		srv.etcdCli = cluster.EtcdClient()
-		promFetcher = cluster
 	}
+	srv.metricsQuerier = srv.clusterManager.MetricsQuerier()
 
 	// general cluster HTTP client
 	{
@@ -124,8 +124,7 @@ func NewServer(ctx context.Context, sctx *sctx.Context) (srv *Server, err error)
 
 	// setup metrics reader
 	{
-		healthCheckCfg := config.NewDefaultHealthCheckConfig()
-		srv.metricsReader = metricsreader.NewDefaultMetricsReader(lg.Named("mr"), promFetcher, srv.clusterManager, srv.httpCli, srv.etcdCli, healthCheckCfg, srv.configManager)
+		srv.metricsReader = srv.metricsQuerier
 		if err = srv.metricsReader.Start(ctx); err != nil {
 			return
 		}
@@ -153,7 +152,7 @@ func NewServer(ctx context.Context, sctx *sctx.Context) (srv *Server, err error)
 			nscs = append(nscs, nsc)
 		}
 
-		err = srv.namespaceManager.Init(lg.Named("nsmgr"), nscs, srv.clusterManager, promFetcher, srv.httpCli, srv.configManager, srv.metricsReader)
+		err = srv.namespaceManager.Init(lg.Named("nsmgr"), nscs, srv.clusterManager, nil, srv.httpCli, srv.configManager, srv.metricsReader)
 		if err != nil {
 			return
 		}
@@ -196,7 +195,7 @@ func NewServer(ctx context.Context, sctx *sctx.Context) (srv *Server, err error)
 		CfgMgr:        srv.configManager,
 		NsMgr:         srv.namespaceManager,
 		CertMgr:       srv.certManager,
-		BackendReader: srv.metricsReader,
+		BackendReader: srv.metricsQuerier,
 		ReplayJobMgr:  srv.replay,
 	}
 	if srv.apiServer, err = api.NewServer(cfg.API, lg.Named("api"), mgrs, handler, ready); err != nil {
