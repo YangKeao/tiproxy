@@ -102,6 +102,9 @@ func NewBackendReader(lg *zap.Logger, cfgGetter config.ConfigGetter, httpCli *ht
 }
 
 func (br *BackendReader) Start(ctx context.Context) error {
+	if br.etcdCli == nil {
+		return nil
+	}
 	cfg := br.cfgGetter.GetConfig()
 	return br.initElection(ctx, cfg)
 }
@@ -155,6 +158,9 @@ func (br *BackendReader) GetQueryResult(key string) QueryResult {
 }
 
 func (br *BackendReader) ReadMetrics(ctx context.Context) error {
+	if br.etcdCli == nil {
+		return nil
+	}
 	// If the zone changes, start a new election.
 	cfg := br.cfgGetter.GetConfig()
 	zone := cfg.GetLocation()
