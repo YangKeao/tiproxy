@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/tls"
 	"maps"
+	"net"
 	"strings"
 	"sync"
 
@@ -15,7 +16,8 @@ import (
 	"github.com/pingcap/tiproxy/pkg/balance/metricsreader"
 	"github.com/pingcap/tiproxy/pkg/manager/infosync"
 	"github.com/pingcap/tiproxy/pkg/util/etcd"
-	"github.com/pingcap/tiproxy/pkg/util/http"
+	httputil "github.com/pingcap/tiproxy/pkg/util/http"
+	"github.com/pingcap/tiproxy/pkg/util/netutil"
 	"github.com/pingcap/tiproxy/pkg/util/waitgroup"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
@@ -27,6 +29,8 @@ type Cluster struct {
 	etcdCli    *clientv3.Client
 	infoSyncer *infosync.InfoSyncer
 	metrics    *metricsreader.ClusterReader
+	httpCli    *httputil.Client
+	dialer     *netutil.DNSDialer
 }
 
 func (c *Cluster) Config() config.BackendCluster {
@@ -57,6 +61,21 @@ func (c *Cluster) GetPromInfo(ctx context.Context) (*infosync.PrometheusInfo, er
 	return c.infoSyncer.GetPromInfo(ctx)
 }
 
+func (c *Cluster) HTTPClient() *httputil.Client {
+	if c == nil {
+		return nil
+	}
+	return c.httpCli
+}
+
+func (c *Cluster) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	if c == nil || c.dialer == nil {
+		var dialer net.Dialer
+		return dialer.DialContext(ctx, network, addr)
+	}
+	return c.dialer.DialContext(ctx, network, addr)
+}
+
 type Manager struct {
 	lg         *zap.Logger
 	clusterTLS func() *tls.Config
@@ -65,6 +84,7 @@ type Manager struct {
 	wg      waitgroup.WaitGroup
 	cancel  context.CancelFunc
 	metrics *MetricsQuerier
+	network *NetworkRouter
 
 	mu struct {
 		sync.RWMutex
@@ -85,6 +105,7 @@ func NewManager(lg *zap.Logger, clusterTLS func() *tls.Config) *Manager {
 	}
 	mgr.mu.clusters = make(map[string]*Cluster)
 	mgr.metrics = NewMetricsQuerier(mgr)
+	mgr.network = NewNetworkRouter(mgr, clusterTLS)
 	return mgr
 }
 
@@ -209,10 +230,18 @@ func clusterReusable(cluster *Cluster, cfg config.BackendCluster) bool {
 
 func (m *Manager) buildCluster(ctx context.Context, cfg *config.Config, clusterCfg config.BackendCluster) (*Cluster, error) {
 	clusterCfg = normalizeCluster(clusterCfg)
-	etcdCli, err := etcd.InitEtcdClientWithAddrs(
+	nameServers, err := config.ParseNSServers(clusterCfg.NSServers)
+	if err != nil {
+		return nil, err
+	}
+	dialer := netutil.NewDNSDialer(nameServers)
+	httpCli := httputil.NewHTTPClientWithDialContext(m.clusterTLS, dialer.DialContext)
+
+	etcdCli, err := etcd.InitEtcdClientWithAddrsAndDialer(
 		m.lg.With(zap.String("cluster", clusterCfg.Name)).Named("etcd"),
 		clusterCfg.PDAddrs,
 		m.clusterTLS(),
+		dialer,
 	)
 	if err != nil {
 		return nil, err
@@ -231,13 +260,15 @@ func (m *Manager) buildCluster(ctx context.Context, cfg *config.Config, clusterC
 		cfg:        clusterCfg,
 		etcdCli:    etcdCli,
 		infoSyncer: infoSyncer,
+		httpCli:    httpCli,
+		dialer:     dialer,
 	}
 	cluster.metrics = metricsreader.NewClusterReader(
 		m.lg.With(zap.String("cluster", clusterCfg.Name)).Named("metrics"),
 		clusterCfg.Name,
 		cluster,
 		cluster,
-		http.NewHTTPClient(m.clusterTLS),
+		httpCli,
 		etcdCli,
 		config.NewDefaultHealthCheckConfig(),
 		m.cfgGetter,
@@ -287,6 +318,13 @@ func (m *Manager) MetricsQuerier() *MetricsQuerier {
 		return nil
 	}
 	return m.metrics
+}
+
+func (m *Manager) NetworkRouter() *NetworkRouter {
+	if m == nil {
+		return nil
+	}
+	return m.network
 }
 
 // PrimaryCluster returns the only configured cluster when the cluster count is exactly one.

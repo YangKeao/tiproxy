@@ -82,6 +82,7 @@ func (r *StaticRouter) OnConnClosed(addr, redirectingAddr string, conn Redirecta
 type StaticBackend struct {
 	addr     string
 	keyspace string
+	cluster  string
 	healthy  atomic.Bool
 }
 
@@ -115,4 +116,8 @@ func (b *StaticBackend) Keyspace() string {
 
 func (b *StaticBackend) SetKeyspace(k string) {
 	b.keyspace = k
+}
+
+func (b *StaticBackend) ClusterName() string {
+	return b.cluster
 }

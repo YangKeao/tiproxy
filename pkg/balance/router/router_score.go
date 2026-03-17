@@ -118,7 +118,11 @@ func (router *ScoreBasedRouter) GetBackendSelector(clientInfo ClientInfo) Backen
 				return
 			}
 			// The router may remove this group concurrently, make sure the group can be accessed after it's removed.
-			backend, err = group.Route(excluded)
+			var backendCtx policy.BackendCtx
+			backendCtx, err = group.Route(excluded)
+			if err == nil && backendCtx != nil {
+				backend = backendCtx.(BackendInst)
+			}
 			return
 		},
 		onCreate: func(backend BackendInst, conn RedirectableConn, succeed bool) {

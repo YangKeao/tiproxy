@@ -306,12 +306,31 @@ func validateAddrList(addrs, field string) error {
 }
 
 func validateNSServerList(nsServers, field string) error {
-	for _, part := range splitAddrList(nsServers) {
-		if _, err := normalizeNSServer(part); err != nil {
-			return errors.Wrapf(ErrInvalidConfigValue, "invalid %s address %s", field, part)
+	if _, err := ParseNSServers(nsServers); err != nil {
+		for _, part := range splitAddrList(nsServers) {
+			if _, normalizeErr := normalizeNSServer(part); normalizeErr != nil {
+				return errors.Wrapf(ErrInvalidConfigValue, "invalid %s address %s", field, part)
+			}
 		}
+		return errors.Wrapf(ErrInvalidConfigValue, "invalid %s", field)
 	}
 	return nil
+}
+
+func ParseNSServers(nsServers string) ([]string, error) {
+	servers := splitAddrList(nsServers)
+	if len(servers) == 0 {
+		return nil, nil
+	}
+	normalized := make([]string, 0, len(servers))
+	for _, server := range servers {
+		addr, err := normalizeNSServer(server)
+		if err != nil {
+			return nil, err
+		}
+		normalized = append(normalized, addr)
+	}
+	return normalized, nil
 }
 
 func normalizeNSServer(server string) (string, error) {

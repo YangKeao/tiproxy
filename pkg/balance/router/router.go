@@ -78,6 +78,7 @@ type BackendInst interface {
 	Healthy() bool
 	Local() bool
 	Keyspace() string
+	ClusterName() string
 }
 
 // backendWrapper contains the connections on the backend.
@@ -174,6 +175,16 @@ func (b *backendWrapper) Keyspace() string {
 		return ""
 	}
 	return labels[config.KeyspaceLabelName]
+}
+
+func (b *backendWrapper) ClusterName() string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	labels := b.mu.BackendHealth.Labels
+	if labels == nil {
+		return ""
+	}
+	return labels[config.ClusterLabelName]
 }
 
 func (b *backendWrapper) Cidr() []string {

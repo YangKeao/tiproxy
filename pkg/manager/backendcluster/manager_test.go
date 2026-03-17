@@ -6,6 +6,7 @@ package backendcluster
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"path"
 	"sync"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/pingcap/tiproxy/lib/config"
 	"github.com/pingcap/tiproxy/lib/util/logger"
 	"github.com/pingcap/tiproxy/pkg/manager/infosync"
+	"github.com/pingcap/tiproxy/pkg/testkit"
 	"github.com/pingcap/tiproxy/pkg/util/etcd"
 	"github.com/stretchr/testify/require"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -115,6 +117,47 @@ func TestManagerDynamicClusterUpdate(t *testing.T) {
 	}, 5*time.Second, 100*time.Millisecond)
 }
 
+func TestManagerUsesClusterNameServersForPD(t *testing.T) {
+	clusterA := newManagerTestEtcdCluster(t)
+	clusterB := newManagerTestEtcdCluster(t)
+	t.Cleanup(func() { clusterA.close(t) })
+	t.Cleanup(func() { clusterB.close(t) })
+
+	clusterA.putTopology(t, "10.0.0.1:4000", &infosync.TiDBTopologyInfo{IP: "10.0.0.1", StatusPort: 10080})
+	clusterB.putTopology(t, "10.0.0.2:4000", &infosync.TiDBTopologyInfo{IP: "10.0.0.2", StatusPort: 10080})
+
+	dnsA := testkit.StartDNSServer(t, map[string][]string{"pd-a.test": {"127.0.0.1"}})
+	dnsB := testkit.StartDNSServer(t, map[string][]string{"pd-b.test": {"127.0.0.1"}})
+	_, portA, err := net.SplitHostPort(clusterA.addr)
+	require.NoError(t, err)
+	_, portB, err := net.SplitHostPort(clusterB.addr)
+	require.NoError(t, err)
+
+	cfg := newManagerTestConfig()
+	cfg.Proxy.BackendClusters = []config.BackendCluster{
+		{Name: "cluster-a", PDAddrs: net.JoinHostPort("pd-a.test", portA), NSServers: dnsA.Addr()},
+		{Name: "cluster-b", PDAddrs: net.JoinHostPort("pd-b.test", portB), NSServers: dnsB.Addr()},
+	}
+	cfgGetter := newManagerTestConfigGetter(cfg)
+
+	mgr := NewManager(zapLoggerForTest(t), nil)
+	require.NoError(t, mgr.Start(context.Background(), cfgGetter, nil))
+	t.Cleanup(func() {
+		require.NoError(t, mgr.Close())
+	})
+
+	require.Eventually(t, func() bool {
+		topology, err := mgr.GetTiDBTopology(context.Background())
+		if err != nil || len(topology) != 2 {
+			return false
+		}
+		return topology["10.0.0.1:4000"].Labels[config.ClusterLabelName] == "cluster-a" &&
+			topology["10.0.0.2:4000"].Labels[config.ClusterLabelName] == "cluster-b"
+	}, 5*time.Second, 100*time.Millisecond)
+	require.Greater(t, dnsA.QueryCount("pd-a.test"), 0)
+	require.Greater(t, dnsB.QueryCount("pd-b.test"), 0)
+}
+
 type managerTestConfigGetter struct {
 	mu  sync.RWMutex
 	cfg *config.Config
@@ -145,7 +188,7 @@ type managerTestEtcdCluster struct {
 
 func newManagerTestEtcdCluster(t *testing.T) *managerTestEtcdCluster {
 	lg, _ := logger.CreateLoggerForTest(t)
-	etcdSrv, err := etcd.CreateEtcdServer("0.0.0.0:0", t.TempDir(), lg)
+	etcdSrv, err := etcd.CreateEtcdServer("127.0.0.1:0", t.TempDir(), lg)
 	require.NoError(t, err)
 	addr := etcdSrv.Clients[0].Addr().String()
 	cli, err := etcd.InitEtcdClientWithAddrs(lg, addr, nil)
