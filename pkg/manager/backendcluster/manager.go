@@ -328,8 +328,7 @@ func (m *Manager) NetworkRouter() *NetworkRouter {
 }
 
 // PrimaryCluster returns the only configured cluster when the cluster count is exactly one.
-// It exists for features that are only well-defined in the single-cluster case, such as VIP,
-// and for temporary transition points that still require a unique cluster.
+// It exists for features that are only well-defined in the single-cluster case, such as VIP.
 func (m *Manager) PrimaryCluster() *Cluster {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -396,4 +395,13 @@ func (m *Manager) Close() error {
 		return nil
 	}
 	return errors.Collect(errors.New("close backend cluster manager"), errs...)
+}
+
+func (m *Manager) PreClose() {
+	for _, cluster := range m.Snapshot() {
+		if cluster == nil || cluster.metrics == nil {
+			continue
+		}
+		cluster.metrics.PreClose()
+	}
 }

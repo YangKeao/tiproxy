@@ -265,33 +265,24 @@ func (router *ScoreBasedRouter) updateGroups() {
 				router.groups = append(router.groups, group)
 			}
 			group = router.groups[0]
-		case MatchClientCIDR, MatchProxyCIDR:
-			cidrs := backend.Cidr()
-			if len(cidrs) == 0 {
-				break
-			}
-			for _, g := range router.groups {
-				if g.Intersect(cidrs) {
-					group = g
+		case MatchClientCIDR, MatchProxyCIDR, MatchPort:
+			var values []string
+			switch router.matchType {
+			case MatchClientCIDR, MatchProxyCIDR:
+				values = backend.Cidr()
+			case MatchPort:
+				port := backend.TiProxyPort()
+				if port == "" {
 					break
 				}
+				values = []string{port}
 			}
-			if group == nil {
-				g, err := NewGroup(cidrs, router.bpCreator, router.matchType, router.logger)
-				if err == nil {
-					group = g
-					router.groups = append(router.groups, group)
-				}
-				// maybe too many logs, ignore the error now
-			}
-		case MatchPort:
-			port := backend.TiProxyPort()
-			if port == "" {
+
+			if len(values) == 0 {
 				break
 			}
-			values := []string{port}
 			for _, g := range router.groups {
-				if g.EqualValues(values) {
+				if g.Intersect(values) {
 					group = g
 					break
 				}
@@ -302,6 +293,7 @@ func (router *ScoreBasedRouter) updateGroups() {
 					group = g
 					router.groups = append(router.groups, group)
 				}
+				// maybe too many logs, ignore the error now
 			}
 		}
 		if group != nil {

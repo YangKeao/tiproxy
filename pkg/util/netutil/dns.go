@@ -27,15 +27,22 @@ type DNSDialer struct {
 	resolver   *net.Resolver
 	dialer     net.Dialer
 	nextServer atomic.Uint64
-	cacheMu    sync.Mutex
-	cache      map[string]dnsCacheEntry
+	mu         struct {
+		sync.Mutex
+		cacheMap map[string]dnsCacheEntry
+	}
 }
 
 func NewDNSDialer(nameServers []string) *DNSDialer {
 	d := &DNSDialer{
 		cacheTTL:   defaultDNSCacheTTL,
 		nameServer: append([]string(nil), nameServers...),
-		cache:      make(map[string]dnsCacheEntry),
+		mu: struct {
+			sync.Mutex
+			cacheMap map[string]dnsCacheEntry
+		}{
+			cacheMap: make(map[string]dnsCacheEntry),
+		},
 	}
 	if len(nameServers) == 0 {
 		return d
@@ -76,13 +83,13 @@ func (d *DNSDialer) DialContext(ctx context.Context, network, addr string) (net.
 func (d *DNSDialer) lookupNetIP(ctx context.Context, host string) ([]net.IP, error) {
 	key := strings.TrimSuffix(strings.ToLower(host), ".")
 	now := time.Now()
-	d.cacheMu.Lock()
-	if entry, ok := d.cache[key]; ok && now.Before(entry.deadline) {
-		ips := cloneIPs(entry.ips)
-		d.cacheMu.Unlock()
+	d.mu.Lock()
+	if entry, ok := d.mu.cacheMap[key]; ok && now.Before(entry.deadline) {
+		ips := entry.ips
+		d.mu.Unlock()
 		return ips, nil
 	}
-	d.cacheMu.Unlock()
+	d.mu.Unlock()
 
 	ips, err := d.resolver.LookupNetIP(ctx, "ip", host)
 	if err != nil {
@@ -92,19 +99,11 @@ func (d *DNSDialer) lookupNetIP(ctx context.Context, host string) ([]net.IP, err
 	for _, ip := range ips {
 		ipList = append(ipList, append(net.IP(nil), ip.AsSlice()...))
 	}
-	d.cacheMu.Lock()
-	d.cache[key] = dnsCacheEntry{
-		ips:      cloneIPs(ipList),
+	d.mu.Lock()
+	d.mu.cacheMap[key] = dnsCacheEntry{
+		ips:      ipList,
 		deadline: now.Add(d.cacheTTL),
 	}
-	d.cacheMu.Unlock()
+	d.mu.Unlock()
 	return ipList, nil
-}
-
-func cloneIPs(ips []net.IP) []net.IP {
-	cloned := make([]net.IP, 0, len(ips))
-	for _, ip := range ips {
-		cloned = append(cloned, append(net.IP(nil), ip...))
-	}
-	return cloned
 }

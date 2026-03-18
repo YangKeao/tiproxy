@@ -12,7 +12,7 @@ import (
 	"github.com/prometheus/common/model"
 )
 
-var _ metricsreader.MetricsReader = (*MetricsQuerier)(nil)
+var _ metricsreader.MetricsQuerier = (*MetricsQuerier)(nil)
 
 // MetricsQuerier is a thin fan-out and merge view over cluster-scoped metrics readers.
 // It does not own any metrics collection lifecycle by itself.
@@ -107,21 +107,6 @@ func (mq *MetricsQuerier) GetBackendMetricsByCluster(clusterName string) []byte 
 		return cluster.metrics.GetBackendMetrics()
 	}
 	return nil
-}
-
-func (mq *MetricsQuerier) PreClose() {
-	if mq == nil || mq.manager == nil {
-		return
-	}
-	for _, cluster := range mq.manager.Snapshot() {
-		if cluster == nil || cluster.metrics == nil {
-			continue
-		}
-		cluster.metrics.PreClose()
-	}
-}
-
-func (mq *MetricsQuerier) Close() {
 }
 
 func (mq *MetricsQuerier) snapshot() map[string]struct {

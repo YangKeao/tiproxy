@@ -32,12 +32,17 @@ type TopologyFetcher interface {
 	GetTiDBTopology(ctx context.Context) (map[string]*infosync.TiDBTopologyInfo, error)
 }
 
-type MetricsReader interface {
-	Start(ctx context.Context) error
+type MetricsQuerier interface {
 	AddQueryExpr(key string, queryExpr QueryExpr, queryRule QueryRule)
 	RemoveQueryExpr(key string)
 	GetQueryResult(key string) QueryResult
 	GetBackendMetrics() []byte
+}
+
+type MetricsReader interface {
+	MetricsQuerier
+
+	Start(ctx context.Context) error
 	PreClose()
 	Close()
 }
