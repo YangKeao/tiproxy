@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/pingcap/tiproxy/lib/util/waitgroup"
 	"github.com/stretchr/testify/require"
@@ -18,6 +19,7 @@ type DNSServer struct {
 	conn    *net.UDPConn
 	records map[string][]net.IP
 	rcodes  map[string]dnsmessage.RCode
+	delay   time.Duration
 	mu      sync.Mutex
 	queries map[string]int
 	wg      waitgroup.WaitGroup
@@ -25,7 +27,7 @@ type DNSServer struct {
 
 func StartDNSServer(t *testing.T, records map[string][]string) *DNSServer {
 	t.Helper()
-	return startDNSServer(t, records, nil)
+	return startDNSServer(t, records, nil, 0)
 }
 
 func StartNameErrorDNSServer(t *testing.T, names ...string) *DNSServer {
@@ -34,10 +36,15 @@ func StartNameErrorDNSServer(t *testing.T, names ...string) *DNSServer {
 	for _, name := range names {
 		rcodes[normalizeDNSName(name)] = dnsmessage.RCodeNameError
 	}
-	return startDNSServer(t, nil, rcodes)
+	return startDNSServer(t, nil, rcodes, 0)
 }
 
-func startDNSServer(t *testing.T, records map[string][]string, rcodes map[string]dnsmessage.RCode) *DNSServer {
+func StartDelayedDNSServer(t *testing.T, delay time.Duration, records map[string][]string) *DNSServer {
+	t.Helper()
+	return startDNSServer(t, records, nil, delay)
+}
+
+func startDNSServer(t *testing.T, records map[string][]string, rcodes map[string]dnsmessage.RCode, delay time.Duration) *DNSServer {
 	t.Helper()
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
 	require.NoError(t, err)
@@ -46,6 +53,7 @@ func startDNSServer(t *testing.T, records map[string][]string, rcodes map[string
 		conn:    conn,
 		records: make(map[string][]net.IP, len(records)),
 		rcodes:  make(map[string]dnsmessage.RCode, len(rcodes)),
+		delay:   delay,
 		queries: make(map[string]int),
 	}
 	for name, ips := range records {
@@ -127,7 +135,11 @@ func (s *DNSServer) handleQuery(pkt []byte) ([]byte, error) {
 	s.queries[name]++
 	records := append([]net.IP(nil), s.records[name]...)
 	rcode := s.rcodes[name]
+	delay := s.delay
 	s.mu.Unlock()
+	if delay > 0 {
+		time.Sleep(delay)
+	}
 
 	respHeader := dnsmessage.Header{
 		ID:                 header.ID,

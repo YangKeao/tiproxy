@@ -162,6 +162,22 @@ func TestDNSDialerReturnsContextErrorWhenNameServerDropsQueries(t *testing.T) {
 	require.Less(t, time.Since(start), time.Second)
 }
 
+func TestDNSDialerHandlesSlowNameServerResponse(t *testing.T) {
+	dns := testkit.StartDelayedDNSServer(t, 50*time.Millisecond, map[string][]string{
+		"slow.test": {"127.0.0.1"},
+	})
+	dialer := NewDNSDialer([]string{dns.Addr()})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	ips, err := dialer.lookupNetIP(ctx, "slow.test")
+
+	require.NoError(t, err)
+	require.NotEmpty(t, ips)
+	require.Equal(t, "127.0.0.1", ips[0].String())
+	require.Greater(t, dns.QueryCount("slow.test"), 0)
+}
+
 func TestDNSDialerRefreshesRotatedAnswersAfterCacheExpiry(t *testing.T) {
 	dns := testkit.StartDNSServer(t, map[string][]string{
 		"tidb.test": {"127.0.0.1"},
