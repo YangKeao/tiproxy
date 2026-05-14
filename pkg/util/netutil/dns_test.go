@@ -77,6 +77,55 @@ func TestDNSDialerFallbackToSystemResolver(t *testing.T) {
 	require.NoError(t, <-accepted)
 }
 
+func TestDNSDialerRoundRobinsConfiguredNameServers(t *testing.T) {
+	dnsA := testkit.StartDNSServer(t, map[string][]string{
+		"tidb.test": {"127.0.0.1"},
+	})
+	dnsB := testkit.StartDNSServer(t, map[string][]string{
+		"tidb.test": {"127.0.0.1"},
+	})
+
+	dialer := NewDNSDialer([]string{dnsA.Addr(), dnsB.Addr()})
+	dialer.cacheTTL = 0
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	for range 4 {
+		ips, err := dialer.lookupNetIP(ctx, "tidb.test")
+		require.NoError(t, err)
+		require.NotEmpty(t, ips)
+		require.Equal(t, "127.0.0.1", ips[0].String())
+	}
+	require.Greater(t, dnsA.QueryCount("tidb.test"), 0)
+	require.Greater(t, dnsB.QueryCount("tidb.test"), 0)
+}
+
+func TestDNSDialerDialsIPDirectlyWithoutNameServerLookup(t *testing.T) {
+	listener, addr := testkit.StartListener(t, "127.0.0.1:0")
+	t.Cleanup(func() { require.NoError(t, listener.Close()) })
+	dns := testkit.StartDNSServer(t, map[string][]string{
+		"127.0.0.1": {"127.0.0.2"},
+	})
+
+	accepted := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			err = conn.Close()
+		}
+		accepted <- err
+	}()
+
+	dialer := NewDNSDialer([]string{dns.Addr()})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+	require.NoError(t, <-accepted)
+	require.Equal(t, 0, dns.QueryCount("127.0.0.1"))
+}
+
 func TestDNSDialerTriesAllResolvedIPs(t *testing.T) {
 	listener, addr := testkit.StartListener(t, "127.0.0.1:0")
 	t.Cleanup(func() { require.NoError(t, listener.Close()) })

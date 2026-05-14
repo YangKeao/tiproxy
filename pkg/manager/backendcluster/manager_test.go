@@ -124,6 +124,79 @@ func TestManagerDynamicClusterUpdate(t *testing.T) {
 	}, 5*time.Second, 100*time.Millisecond)
 }
 
+func TestManagerDynamicAddRemoveAllClusters(t *testing.T) {
+	clusterA := newManagerTestEtcdCluster(t)
+	clusterB := newManagerTestEtcdCluster(t)
+	t.Cleanup(func() { clusterA.close(t) })
+	t.Cleanup(func() { clusterB.close(t) })
+
+	clusterA.putTopology(t, "10.0.0.1:4000", &infosync.TiDBTopologyInfo{IP: "10.0.0.1", StatusPort: 10080})
+	clusterB.putTopology(t, "10.0.0.2:4000", &infosync.TiDBTopologyInfo{IP: "10.0.0.2", StatusPort: 10080})
+
+	cfg := newManagerTestConfig()
+	cfgGetter := newManagerTestConfigGetter(cfg)
+	cfgCh := make(chan *config.Config, 4)
+
+	mgr := NewManager(zapLoggerForTest(t), nilClusterTLS)
+	require.NoError(t, mgr.Start(context.Background(), cfgGetter, cfgCh))
+	t.Cleanup(func() {
+		require.NoError(t, mgr.Close())
+	})
+
+	topology, err := mgr.GetTiDBTopology(context.Background())
+	require.NoError(t, err)
+	require.Empty(t, topology)
+	require.False(t, mgr.HasBackendClusters())
+
+	updateClusters := func(clusters []config.BackendCluster) {
+		nextCfg := cfg.Clone()
+		nextCfg.Proxy.BackendClusters = clusters
+		cfgGetter.setConfig(nextCfg)
+		cfgCh <- nextCfg.Clone()
+	}
+
+	updateClusters([]config.BackendCluster{{Name: "cluster-a", PDAddrs: clusterA.addr}})
+	require.Eventually(t, func() bool {
+		topology, err := mgr.GetTiDBTopology(context.Background())
+		if err != nil || len(topology) != 1 {
+			return false
+		}
+		_, ok := topology[backendID("cluster-a", "10.0.0.1:4000")]
+		return ok && mgr.HasBackendClusters()
+	}, 5*time.Second, 100*time.Millisecond)
+
+	updateClusters([]config.BackendCluster{
+		{Name: "cluster-a", PDAddrs: clusterA.addr},
+		{Name: "cluster-b", PDAddrs: clusterB.addr},
+	})
+	require.Eventually(t, func() bool {
+		topology, err := mgr.GetTiDBTopology(context.Background())
+		if err != nil || len(topology) != 2 {
+			return false
+		}
+		_, okA := topology[backendID("cluster-a", "10.0.0.1:4000")]
+		_, okB := topology[backendID("cluster-b", "10.0.0.2:4000")]
+		return okA && okB
+	}, 5*time.Second, 100*time.Millisecond)
+
+	updateClusters([]config.BackendCluster{{Name: "cluster-b", PDAddrs: clusterB.addr}})
+	require.Eventually(t, func() bool {
+		topology, err := mgr.GetTiDBTopology(context.Background())
+		if err != nil || len(topology) != 1 {
+			return false
+		}
+		_, okA := topology[backendID("cluster-a", "10.0.0.1:4000")]
+		_, okB := topology[backendID("cluster-b", "10.0.0.2:4000")]
+		return !okA && okB
+	}, 5*time.Second, 100*time.Millisecond)
+
+	updateClusters(nil)
+	require.Eventually(t, func() bool {
+		topology, err := mgr.GetTiDBTopology(context.Background())
+		return err == nil && len(topology) == 0 && !mgr.HasBackendClusters()
+	}, 5*time.Second, 100*time.Millisecond)
+}
+
 func TestManagerUsesClusterNameServersForPD(t *testing.T) {
 	clusterA := newManagerTestEtcdCluster(t)
 	clusterB := newManagerTestEtcdCluster(t)
@@ -165,6 +238,110 @@ func TestManagerUsesClusterNameServersForPD(t *testing.T) {
 	}, 5*time.Second, 100*time.Millisecond)
 	require.Greater(t, dnsA.QueryCount("pd-a.test"), 0)
 	require.Greater(t, dnsB.QueryCount("pd-b.test"), 0)
+}
+
+func TestManagerUsesReachableResolvedPDIP(t *testing.T) {
+	cluster := newManagerTestEtcdCluster(t)
+	t.Cleanup(func() { cluster.close(t) })
+
+	cluster.putTopology(t, "10.0.0.1:4000", &infosync.TiDBTopologyInfo{IP: "10.0.0.1", StatusPort: 10080})
+
+	dns := testkit.StartDNSServer(t, map[string][]string{
+		"pd-ha.test": {"127.0.0.2", "127.0.0.1"},
+	})
+	_, port, err := net.SplitHostPort(cluster.addr)
+	require.NoError(t, err)
+
+	cfg := newManagerTestConfig()
+	cfg.Proxy.BackendClusters = []config.BackendCluster{
+		{Name: "cluster-a", PDAddrs: net.JoinHostPort("pd-ha.test", port), NSServers: []string{dns.Addr()}},
+	}
+	cfgGetter := newManagerTestConfigGetter(cfg)
+	cfgCh := make(chan *config.Config, 1)
+
+	mgr := NewManager(zapLoggerForTest(t), nilClusterTLS)
+	require.NoError(t, mgr.Start(context.Background(), cfgGetter, cfgCh))
+	t.Cleanup(func() {
+		close(cfgCh)
+		require.NoError(t, mgr.Close())
+	})
+
+	require.Eventually(t, func() bool {
+		topology, err := mgr.GetTiDBTopology(context.Background())
+		if err != nil || len(topology) != 1 {
+			return false
+		}
+		_, ok := topology[backendID("cluster-a", "10.0.0.1:4000")]
+		return ok
+	}, 5*time.Second, 100*time.Millisecond)
+	require.Greater(t, dns.QueryCount("pd-ha.test"), 0)
+}
+
+func TestManagerNetworkRouterUsesClusterNameServersForTiDB(t *testing.T) {
+	clusterA := newManagerTestEtcdCluster(t)
+	clusterB := newManagerTestEtcdCluster(t)
+	t.Cleanup(func() { clusterA.close(t) })
+	t.Cleanup(func() { clusterB.close(t) })
+
+	dnsA := testkit.StartDNSServer(t, map[string][]string{"tidb-a.test": {"127.0.0.1"}})
+	dnsB := testkit.StartDNSServer(t, map[string][]string{"tidb-b.test": {"127.0.0.1"}})
+	listenerA, addrA := testkit.StartListener(t, "127.0.0.1:0")
+	listenerB, addrB := testkit.StartListener(t, "127.0.0.1:0")
+	t.Cleanup(func() { require.NoError(t, listenerA.Close()) })
+	t.Cleanup(func() { require.NoError(t, listenerB.Close()) })
+	_, portA, err := net.SplitHostPort(addrA)
+	require.NoError(t, err)
+	_, portB, err := net.SplitHostPort(addrB)
+	require.NoError(t, err)
+
+	acceptOne := func(listener net.Listener) <-chan error {
+		accepted := make(chan error, 1)
+		go func() {
+			conn, err := listener.Accept()
+			if err == nil {
+				err = conn.Close()
+			}
+			accepted <- err
+		}()
+		return accepted
+	}
+	acceptedA := acceptOne(listenerA)
+	acceptedB := acceptOne(listenerB)
+
+	cfg := newManagerTestConfig()
+	cfg.Proxy.BackendClusters = []config.BackendCluster{
+		{Name: "cluster-a", PDAddrs: clusterA.addr, NSServers: []string{dnsA.Addr()}},
+		{Name: "cluster-b", PDAddrs: clusterB.addr, NSServers: []string{dnsB.Addr()}},
+	}
+	cfgGetter := newManagerTestConfigGetter(cfg)
+	cfgCh := make(chan *config.Config, 1)
+
+	mgr := NewManager(zapLoggerForTest(t), nilClusterTLS)
+	require.NoError(t, mgr.Start(context.Background(), cfgGetter, cfgCh))
+	t.Cleanup(func() {
+		close(cfgCh)
+		require.NoError(t, mgr.Close())
+	})
+	require.Eventually(t, func() bool {
+		return len(mgr.Snapshot()) == 2
+	}, 5*time.Second, 100*time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, err := mgr.NetworkRouter().DialContext(ctx, "tcp", net.JoinHostPort("tidb-a.test", portA), "cluster-a")
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+	require.NoError(t, <-acceptedA)
+
+	conn, err = mgr.NetworkRouter().DialContext(ctx, "tcp", net.JoinHostPort("tidb-b.test", portB), "cluster-b")
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+	require.NoError(t, <-acceptedB)
+
+	require.Greater(t, dnsA.QueryCount("tidb-a.test"), 0)
+	require.Equal(t, 0, dnsA.QueryCount("tidb-b.test"))
+	require.Greater(t, dnsB.QueryCount("tidb-b.test"), 0)
+	require.Equal(t, 0, dnsB.QueryCount("tidb-a.test"))
 }
 
 func TestManagerKeepsOldClusterWhenUpdateFails(t *testing.T) {
@@ -217,6 +394,63 @@ func TestManagerKeepsOldClusterWhenUpdateFails(t *testing.T) {
 	require.Contains(t, topology, backendID("cluster-a", "10.0.0.1:4000"))
 	require.NotContains(t, topology, backendID("cluster-a", "10.0.0.2:4000"))
 }
+
+func TestManagerUpdatesClusterPDAddrs(t *testing.T) {
+	clusterA := newManagerTestEtcdCluster(t)
+	clusterB := newManagerTestEtcdCluster(t)
+	t.Cleanup(func() { clusterA.close(t) })
+	t.Cleanup(func() { clusterB.close(t) })
+
+	clusterA.putTopology(t, "10.0.0.1:4000", &infosync.TiDBTopologyInfo{IP: "10.0.0.1", StatusPort: 10080})
+	clusterB.putTopology(t, "10.0.0.2:4000", &infosync.TiDBTopologyInfo{IP: "10.0.0.2", StatusPort: 10080})
+
+	cfg := newManagerTestConfig()
+	cfg.Proxy.BackendClusters = []config.BackendCluster{
+		{Name: "cluster-a", PDAddrs: clusterA.addr},
+	}
+	cfgGetter := newManagerTestConfigGetter(cfg)
+	cfgCh := make(chan *config.Config, 1)
+
+	mgr := NewManager(zapLoggerForTest(t), nilClusterTLS)
+	require.NoError(t, mgr.Start(context.Background(), cfgGetter, cfgCh))
+	t.Cleanup(func() {
+		close(cfgCh)
+		require.NoError(t, mgr.Close())
+	})
+
+	require.Eventually(t, func() bool {
+		topology, err := mgr.GetTiDBTopology(context.Background())
+		if err != nil || len(topology) != 1 {
+			return false
+		}
+		_, ok := topology[backendID("cluster-a", "10.0.0.1:4000")]
+		return ok
+	}, 5*time.Second, 100*time.Millisecond)
+	originalCluster := mgr.Snapshot()["cluster-a"]
+	require.NotNil(t, originalCluster)
+
+	nextCfg := cfg.Clone()
+	nextCfg.Proxy.BackendClusters = []config.BackendCluster{
+		{Name: "cluster-a", PDAddrs: clusterB.addr},
+	}
+	cfgGetter.setConfig(nextCfg)
+	cfgCh <- nextCfg.Clone()
+
+	require.Eventually(t, func() bool {
+		currentCluster := mgr.Snapshot()["cluster-a"]
+		if currentCluster == nil || currentCluster == originalCluster {
+			return false
+		}
+		topology, err := mgr.GetTiDBTopology(context.Background())
+		if err != nil || len(topology) != 1 {
+			return false
+		}
+		_, oldOK := topology[backendID("cluster-a", "10.0.0.1:4000")]
+		_, newOK := topology[backendID("cluster-a", "10.0.0.2:4000")]
+		return !oldOK && newOK
+	}, 5*time.Second, 100*time.Millisecond)
+}
+
 func TestManagerUpdatesClusterNameServersForPD(t *testing.T) {
 	cluster := newManagerTestEtcdCluster(t)
 	t.Cleanup(func() { cluster.close(t) })
@@ -262,6 +496,7 @@ func TestManagerUpdatesClusterNameServersForPD(t *testing.T) {
 			dnsB.QueryCount("pd.test") > 0
 	}, 5*time.Second, 100*time.Millisecond)
 }
+
 func TestManagerKeepsDuplicateBackendAddrsAcrossClusters(t *testing.T) {
 	clusterA := newManagerTestEtcdCluster(t)
 	clusterB := newManagerTestEtcdCluster(t)
