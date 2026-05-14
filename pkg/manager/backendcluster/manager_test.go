@@ -68,6 +68,36 @@ func TestManagerFetchesAllClusters(t *testing.T) {
 	}, 5*time.Second, 100*time.Millisecond)
 }
 
+func TestManagerGetTiDBTopologySkipsUnavailableCluster(t *testing.T) {
+	mgr := NewManager(zapLoggerForTest(t), nilClusterTLS)
+	mgr.mu.clusters = map[string]*Cluster{
+		"cluster-a": {
+			getTiDBTopology: func(context.Context) (map[string]*infosync.TiDBTopologyInfo, error) {
+				return map[string]*infosync.TiDBTopologyInfo{
+					"10.0.0.1:4000": {IP: "10.0.0.1", StatusPort: 10080, Addr: "10.0.0.1:4000"},
+				}, nil
+			},
+		},
+		"cluster-b": {
+			getTiDBTopology: func(ctx context.Context) (map[string]*infosync.TiDBTopologyInfo, error) {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	topology, err := mgr.GetTiDBTopology(ctx)
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	require.Less(t, elapsed, 3*time.Second)
+	require.Contains(t, topology, backendID("cluster-a", "10.0.0.1:4000"))
+	require.NotContains(t, topology, backendID("cluster-b", "10.0.0.2:4000"))
+}
+
 func TestManagerDynamicClusterUpdate(t *testing.T) {
 	clusterA := newManagerTestEtcdCluster(t)
 	clusterB := newManagerTestEtcdCluster(t)

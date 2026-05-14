@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/pingcap/tiproxy/lib/config"
 	"github.com/pingcap/tiproxy/lib/util/errors"
@@ -18,6 +19,8 @@ import (
 	"github.com/pingcap/tiproxy/pkg/util/waitgroup"
 	"go.uber.org/zap"
 )
+
+const topologyFetchTimeout = 2 * time.Second
 
 type Manager struct {
 	lg         *zap.Logger
@@ -213,9 +216,39 @@ func (m *Manager) GetTiDBTopology(ctx context.Context) (map[string]*infosync.TiD
 	clusters := m.Snapshot()
 	merged := make(map[string]*infosync.TiDBTopologyInfo, 128)
 	errs := make([]error, 0, len(clusters))
+
+	type topologyResult struct {
+		clusterName string
+		infos       map[string]*infosync.TiDBTopologyInfo
+		err         error
+	}
+
+	resultCh := make(chan topologyResult, len(clusters))
+	var wg sync.WaitGroup
 	for clusterName, cluster := range clusters {
-		infos, err := cluster.GetTiDBTopology(ctx)
+		wg.Add(1)
+		go func(clusterName string, cluster *Cluster) {
+			defer wg.Done()
+			clusterCtx, cancel := context.WithTimeout(ctx, topologyFetchTimeout)
+			defer cancel()
+			infos, err := cluster.GetTiDBTopology(clusterCtx)
+			resultCh <- topologyResult{
+				clusterName: clusterName,
+				infos:       infos,
+				err:         err,
+			}
+		}(clusterName, cluster)
+	}
+	wg.Wait()
+	close(resultCh)
+
+	for result := range resultCh {
+		clusterName := result.clusterName
+		infos := result.infos
+		err := result.err
 		if err != nil {
+			m.lg.Warn("fetch TiDB topology from backend cluster failed",
+				zap.String("cluster", clusterName), zap.Error(err))
 			errs = append(errs, err)
 			continue
 		}

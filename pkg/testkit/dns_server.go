@@ -17,6 +17,7 @@ import (
 type DNSServer struct {
 	conn    *net.UDPConn
 	records map[string][]net.IP
+	rcodes  map[string]dnsmessage.RCode
 	mu      sync.Mutex
 	queries map[string]int
 	wg      waitgroup.WaitGroup
@@ -24,12 +25,27 @@ type DNSServer struct {
 
 func StartDNSServer(t *testing.T, records map[string][]string) *DNSServer {
 	t.Helper()
+	return startDNSServer(t, records, nil)
+}
+
+func StartNameErrorDNSServer(t *testing.T, names ...string) *DNSServer {
+	t.Helper()
+	rcodes := make(map[string]dnsmessage.RCode, len(names))
+	for _, name := range names {
+		rcodes[normalizeDNSName(name)] = dnsmessage.RCodeNameError
+	}
+	return startDNSServer(t, nil, rcodes)
+}
+
+func startDNSServer(t *testing.T, records map[string][]string, rcodes map[string]dnsmessage.RCode) *DNSServer {
+	t.Helper()
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
 	require.NoError(t, err)
 
 	server := &DNSServer{
 		conn:    conn,
 		records: make(map[string][]net.IP, len(records)),
+		rcodes:  make(map[string]dnsmessage.RCode, len(rcodes)),
 		queries: make(map[string]int),
 	}
 	for name, ips := range records {
@@ -39,6 +55,9 @@ func StartDNSServer(t *testing.T, records map[string][]string) *DNSServer {
 			server.records[key] = append(server.records[key], net.ParseIP(ip))
 		}
 	}
+	for name, rcode := range rcodes {
+		server.rcodes[normalizeDNSName(name)] = rcode
+	}
 	server.wg.Run(func() {
 		server.serve()
 	})
@@ -46,6 +65,17 @@ func StartDNSServer(t *testing.T, records map[string][]string) *DNSServer {
 		require.NoError(t, server.Close())
 	})
 	return server
+}
+
+func (s *DNSServer) SetRecords(name string, ips []string) {
+	records := make([]net.IP, 0, len(ips))
+	for _, ip := range ips {
+		records = append(records, net.ParseIP(ip))
+	}
+	s.mu.Lock()
+	s.records[normalizeDNSName(name)] = records
+	delete(s.rcodes, normalizeDNSName(name))
+	s.mu.Unlock()
 }
 
 func (s *DNSServer) Addr() string {
@@ -95,12 +125,15 @@ func (s *DNSServer) handleQuery(pkt []byte) ([]byte, error) {
 	name := normalizeDNSName(question.Name.String())
 	s.mu.Lock()
 	s.queries[name]++
+	records := append([]net.IP(nil), s.records[name]...)
+	rcode := s.rcodes[name]
 	s.mu.Unlock()
 
 	respHeader := dnsmessage.Header{
 		ID:                 header.ID,
 		Response:           true,
 		RecursionAvailable: true,
+		RCode:              rcode,
 	}
 	builder := dnsmessage.NewBuilder(nil, respHeader)
 	builder.EnableCompression()
@@ -113,7 +146,10 @@ func (s *DNSServer) handleQuery(pkt []byte) ([]byte, error) {
 	if err := builder.StartAnswers(); err != nil {
 		return nil, err
 	}
-	for _, ip := range s.records[name] {
+	if rcode != dnsmessage.RCodeSuccess {
+		return builder.Finish()
+	}
+	for _, ip := range records {
 		if ipv4 := ip.To4(); ipv4 != nil && question.Type == dnsmessage.TypeA {
 			resource := dnsmessage.Resource{
 				Header: dnsmessage.ResourceHeader{

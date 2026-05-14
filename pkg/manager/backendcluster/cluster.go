@@ -27,6 +27,8 @@ type Cluster struct {
 	metrics    *metricsreader.ClusterReader
 	httpCli    *httputil.Client
 	dialer     *netutil.DNSDialer
+
+	getTiDBTopology func(context.Context) (map[string]*infosync.TiDBTopologyInfo, error)
 }
 
 func (c *Cluster) Config() config.BackendCluster {
@@ -38,6 +40,9 @@ func (c *Cluster) EtcdClient() *clientv3.Client {
 }
 
 func (c *Cluster) GetTiDBTopology(ctx context.Context) (map[string]*infosync.TiDBTopologyInfo, error) {
+	if c.getTiDBTopology != nil {
+		return c.getTiDBTopology(ctx)
+	}
 	return c.infoSyncer.GetTiDBTopology(ctx)
 }
 

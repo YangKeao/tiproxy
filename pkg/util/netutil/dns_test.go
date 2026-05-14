@@ -126,6 +126,71 @@ func TestDNSDialerDialsIPDirectlyWithoutNameServerLookup(t *testing.T) {
 	require.Equal(t, 0, dns.QueryCount("127.0.0.1"))
 }
 
+func TestDNSDialerReturnsNameErrorFromConfiguredNameServer(t *testing.T) {
+	dns := testkit.StartNameErrorDNSServer(t, "missing.test")
+	dialer := NewDNSDialer([]string{dns.Addr()})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err := dialer.lookupNetIP(ctx, "missing.test")
+
+	require.Error(t, err)
+	require.Greater(t, dns.QueryCount("missing.test"), 0)
+}
+
+func TestDNSDialerReturnsContextErrorWhenNameServerDropsQueries(t *testing.T) {
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, conn.Close()) })
+
+	go func() {
+		buf := make([]byte, 1500)
+		for {
+			if _, _, err := conn.ReadFromUDP(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	dialer := NewDNSDialer([]string{conn.LocalAddr().String()})
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err = dialer.lookupNetIP(ctx, "timeout.test")
+
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Less(t, time.Since(start), time.Second)
+}
+
+func TestDNSDialerRefreshesRotatedAnswersAfterCacheExpiry(t *testing.T) {
+	dns := testkit.StartDNSServer(t, map[string][]string{
+		"tidb.test": {"127.0.0.1"},
+	})
+	dialer := NewDNSDialer([]string{dns.Addr()})
+	dialer.cacheTTL = 20 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	ips, err := dialer.lookupNetIP(ctx, "tidb.test")
+	require.NoError(t, err)
+	require.NotEmpty(t, ips)
+	require.Equal(t, "127.0.0.1", ips[0].String())
+
+	dns.SetRecords("tidb.test", []string{"127.0.0.2"})
+	ips, err = dialer.lookupNetIP(ctx, "tidb.test")
+	require.NoError(t, err)
+	require.NotEmpty(t, ips)
+	require.Equal(t, "127.0.0.1", ips[0].String())
+
+	time.Sleep(dialer.cacheTTL + 10*time.Millisecond)
+
+	ips, err = dialer.lookupNetIP(ctx, "tidb.test")
+	require.NoError(t, err)
+	require.NotEmpty(t, ips)
+	require.Equal(t, "127.0.0.2", ips[0].String())
+	require.GreaterOrEqual(t, dns.QueryCount("tidb.test"), 2)
+}
+
 func TestDNSDialerTriesAllResolvedIPs(t *testing.T) {
 	listener, addr := testkit.StartListener(t, "127.0.0.1:0")
 	t.Cleanup(func() { require.NoError(t, listener.Close()) })
