@@ -102,10 +102,9 @@ func NewServer(cfg config.API, lg *zap.Logger, mgr Managers, handler HTTPHandler
 	if err != nil {
 		return nil, err
 	}
-	switch cfg.ProxyProtocol {
-	case "v2":
-		h.listener = proxyprotocol.NewListener(h.listener)
-	}
+	// Accept optional PROXY protocol v2 before protocol sniffing. Some LBs add
+	// the header to health-check connections when proxy protocol is enabled.
+	h.listener = proxyprotocol.NewListener(h.listener)
 
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()

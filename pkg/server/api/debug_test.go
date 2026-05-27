@@ -4,11 +4,14 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
+	"net"
 	"net/http"
 	"testing"
 
+	"github.com/pingcap/tiproxy/pkg/proxy/proxyprotocol"
 	"github.com/stretchr/testify/require"
 )
 
@@ -110,4 +113,31 @@ func TestDebugHealthAllowsHTTPWithHTTPTLS(t *testing.T) {
 	doHTTPS(t, http.MethodGet, "/api/metrics", httpOpts{}, func(t *testing.T, r *http.Response) {
 		require.Equal(t, http.StatusOK, r.StatusCode)
 	})
+}
+
+func TestDebugHealthAllowsHTTPWithProxyProtocolAndHTTPTLS(t *testing.T) {
+	server, _, _ := createServerWithConfig(t, `security.server-http-tls.auto-certs = true`)
+
+	conn, err := net.Dial("tcp", server.listener.Addr().String())
+	require.NoError(t, err)
+	defer conn.Close()
+
+	proxyHeader, err := (&proxyprotocol.Proxy{
+		Version:    proxyprotocol.ProxyVersion2,
+		Command:    proxyprotocol.ProxyCommandProxy,
+		SrcAddress: &net.TCPAddr{IP: net.ParseIP("10.0.173.66"), Port: 1386},
+		DstAddress: &net.TCPAddr{IP: net.ParseIP("10.0.139.229"), Port: 3080},
+	}).ToBytes()
+	require.NoError(t, err)
+	_, err = conn.Write(proxyHeader)
+	require.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodGet, "http://"+server.listener.Addr().String()+"/api/debug/health", nil)
+	require.NoError(t, err)
+	require.NoError(t, req.Write(conn))
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 }
