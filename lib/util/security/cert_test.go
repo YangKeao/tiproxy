@@ -256,6 +256,33 @@ func TestCertServer(t *testing.T) {
 	}
 }
 
+func TestClientSessionCacheConfig(t *testing.T) {
+	lg, _ := logger.CreateLoggerForTest(t)
+
+	ci := NewCert(false)
+	ci.SetConfig(config.TLSConfig{
+		SkipCA:                 true,
+		ClientSessionCacheSize: 8,
+	})
+	tcfg1, err := ci.Reload(lg)
+	require.NoError(t, err)
+	require.NotNil(t, tcfg1)
+	require.NotNil(t, tcfg1.ClientSessionCache)
+
+	tcfg2, err := ci.Reload(lg)
+	require.NoError(t, err)
+	require.NotNil(t, tcfg2)
+	require.True(t, tcfg1.ClientSessionCache == tcfg2.ClientSessionCache)
+
+	ci.SetConfig(config.TLSConfig{
+		SkipCA: true,
+	})
+	tcfg3, err := ci.Reload(lg)
+	require.NoError(t, err)
+	require.NotNil(t, tcfg3)
+	require.Nil(t, tcfg3.ClientSessionCache)
+}
+
 func TestReload(t *testing.T) {
 	lg, text := logger.CreateLoggerForTest(t)
 	tmpdir := t.TempDir()

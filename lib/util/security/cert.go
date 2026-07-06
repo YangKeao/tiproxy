@@ -25,11 +25,17 @@ const (
 var emptyCert = new(tls.Certificate)
 
 type CertInfo struct {
-	cfg         atomic.Pointer[config.TLSConfig]
-	ca          atomic.Pointer[x509.CertPool]
-	cert        atomic.Pointer[tls.Certificate]
-	autoCertExp atomic.Int64
-	server      bool
+	cfg                atomic.Pointer[config.TLSConfig]
+	ca                 atomic.Pointer[x509.CertPool]
+	cert               atomic.Pointer[tls.Certificate]
+	clientSessionCache atomic.Pointer[clientSessionCacheHolder]
+	autoCertExp        atomic.Int64
+	server             bool
+}
+
+type clientSessionCacheHolder struct {
+	size  int
+	cache tls.ClientSessionCache
 }
 
 func NewCert(server bool) *CertInfo {
@@ -80,6 +86,23 @@ func (ci *CertInfo) getClientCert(*tls.CertificateRequestInfo) (*tls.Certificate
 		return emptyCert, nil
 	}
 	return cert, nil
+}
+
+func (ci *CertInfo) getClientSessionCache(size int) tls.ClientSessionCache {
+	if size <= 0 {
+		ci.clientSessionCache.Store(nil)
+		return nil
+	}
+	holder := ci.clientSessionCache.Load()
+	if holder != nil && holder.size == size {
+		return holder.cache
+	}
+	holder = &clientSessionCacheHolder{
+		size:  size,
+		cache: tls.NewLRUClientSessionCache(size),
+	}
+	ci.clientSessionCache.Store(holder)
+	return holder.cache
 }
 
 func (ci *CertInfo) verifyCA(rawCerts [][]byte) error {
@@ -237,10 +260,12 @@ func (ci *CertInfo) buildClientConfig(lg *zap.Logger) (*tls.Config, error) {
 	if !cfg.HasCA() {
 		if cfg.SkipCA {
 			// still enable TLS without verify server certs
-			return &tls.Config{
+			tcfg := &tls.Config{
 				InsecureSkipVerify: true,
 				MinVersion:         GetMinTLSVer(cfg.MinTLSVersion, lg),
-			}, nil
+			}
+			tcfg.ClientSessionCache = ci.getClientSessionCache(cfg.ClientSessionCacheSize)
+			return tcfg, nil
 		}
 		lg.Debug("no CA to verify server connections, disable TLS")
 		return nil, nil
@@ -255,6 +280,7 @@ func (ci *CertInfo) buildClientConfig(lg *zap.Logger) (*tls.Config, error) {
 			return ci.verifyCA(rawCerts)
 		},
 	}
+	tcfg.ClientSessionCache = ci.getClientSessionCache(cfg.ClientSessionCacheSize)
 
 	caPEM, err := os.ReadFile(cfg.CA)
 	if err != nil {

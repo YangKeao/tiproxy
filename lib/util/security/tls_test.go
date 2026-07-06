@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"testing"
 
+	"github.com/pingcap/tiproxy/lib/config"
 	"github.com/pingcap/tiproxy/lib/util/logger"
 	"github.com/stretchr/testify/require"
 )
@@ -62,6 +63,17 @@ func TestGetMinTLSVer(t *testing.T) {
 			require.Empty(t, text.String())
 		}
 	}
+}
+
+func TestBuildClientTLSConfigSessionCache(t *testing.T) {
+	lg, _ := logger.CreateLoggerForTest(t)
+	tcfg, err := BuildClientTLSConfig(lg, config.TLSConfig{
+		SkipCA:                 true,
+		ClientSessionCacheSize: 4,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, tcfg)
+	require.NotNil(t, tcfg.ClientSessionCache)
 }
 
 func TestRsaSize(t *testing.T) {

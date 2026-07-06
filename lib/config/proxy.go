@@ -219,6 +219,18 @@ func (cfg *Config) Check() error {
 	if err := cfg.Proxy.Check(); err != nil {
 		return err
 	}
+	if err := checkTLSConfig("security.server-tls", cfg.Security.ServerSQLTLS); err != nil {
+		return err
+	}
+	if err := checkTLSConfig("security.server-http-tls", cfg.Security.ServerHTTPTLS); err != nil {
+		return err
+	}
+	if err := checkTLSConfig("security.cluster-tls", cfg.Security.ClusterTLS); err != nil {
+		return err
+	}
+	if err := checkTLSConfig("security.sql-tls", cfg.Security.SQLTLS); err != nil {
+		return err
+	}
 
 	if err := cfg.Balance.Check(); err != nil {
 		return err
@@ -233,6 +245,13 @@ func (cfg *Config) Check() error {
 		return errors.Wrapf(ErrInvalidConfigValue, "ha.garp-refresh-count must be greater than or equal to 0")
 	}
 
+	return nil
+}
+
+func checkTLSConfig(name string, cfg TLSConfig) error {
+	if cfg.ClientSessionCacheSize < 0 {
+		return errors.Wrapf(ErrInvalidConfigValue, "%s.client-session-cache-size must be greater than or equal to 0", name)
+	}
 	return nil
 }
 

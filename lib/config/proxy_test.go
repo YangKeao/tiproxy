@@ -79,12 +79,13 @@ var testProxyConfig = Config{
 			Key:    "c",
 		},
 		SQLTLS: TLSConfig{
-			CA:                 "a",
-			RSAKeySize:         0,
-			AutoExpireDuration: "1y",
-			SkipCA:             true,
-			Cert:               "b",
-			Key:                "c",
+			CA:                     "a",
+			RSAKeySize:             0,
+			AutoExpireDuration:     "1y",
+			SkipCA:                 true,
+			Cert:                   "b",
+			Key:                    "c",
+			ClientSessionCacheSize: 64,
 		},
 		RequireBackendTLS: true,
 	},
@@ -226,6 +227,12 @@ func TestProxyCheck(t *testing.T) {
 		{
 			pre: func(t *testing.T, c *Config) {
 				c.Proxy.FailoverTimeout = -1
+			},
+			err: ErrInvalidConfigValue,
+		},
+		{
+			pre: func(t *testing.T, c *Config) {
+				c.Security.SQLTLS.ClientSessionCacheSize = -1
 			},
 			err: ErrInvalidConfigValue,
 		},

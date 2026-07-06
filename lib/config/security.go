@@ -4,15 +4,16 @@
 package config
 
 type TLSConfig struct {
-	Cert               string   `yaml:"cert,omitempty" toml:"cert,omitempty" json:"cert,omitempty" reloadable:"true"`
-	Key                string   `yaml:"key,omitempty" toml:"key,omitempty" json:"key,omitempty" reloadable:"true"`
-	CA                 string   `yaml:"ca,omitempty" toml:"ca,omitempty" json:"ca,omitempty" reloadable:"true"`
-	MinTLSVersion      string   `yaml:"min-tls-version,omitempty" toml:"min-tls-version,omitempty" json:"min-tls-version,omitempty" reloadable:"true"`
-	CertAllowedCN      []string `yaml:"cert-allowed-cn,omitempty" toml:"cert-allowed-cn,omitempty" json:"cert-allowed-cn,omitempty" reloadable:"true"`
-	AutoCerts          bool     `yaml:"auto-certs,omitempty" toml:"auto-certs,omitempty" json:"auto-certs,omitempty" reloadable:"true"`
-	RSAKeySize         int      `yaml:"rsa-key-size,omitempty" toml:"rsa-key-size,omitempty" json:"rsa-key-size,omitempty" reloadable:"true"`
-	AutoExpireDuration string   `yaml:"autocert-expire-duration,omitempty" toml:"autocert-expire-duration,omitempty" json:"autocert-expire-duration,omitempty" reloadable:"true"`
-	SkipCA             bool     `yaml:"skip-ca,omitempty" toml:"skip-ca,omitempty" json:"skip-ca,omitempty" reloadable:"true"`
+	Cert                   string   `yaml:"cert,omitempty" toml:"cert,omitempty" json:"cert,omitempty" reloadable:"true"`
+	Key                    string   `yaml:"key,omitempty" toml:"key,omitempty" json:"key,omitempty" reloadable:"true"`
+	CA                     string   `yaml:"ca,omitempty" toml:"ca,omitempty" json:"ca,omitempty" reloadable:"true"`
+	MinTLSVersion          string   `yaml:"min-tls-version,omitempty" toml:"min-tls-version,omitempty" json:"min-tls-version,omitempty" reloadable:"true"`
+	CertAllowedCN          []string `yaml:"cert-allowed-cn,omitempty" toml:"cert-allowed-cn,omitempty" json:"cert-allowed-cn,omitempty" reloadable:"true"`
+	AutoCerts              bool     `yaml:"auto-certs,omitempty" toml:"auto-certs,omitempty" json:"auto-certs,omitempty" reloadable:"true"`
+	RSAKeySize             int      `yaml:"rsa-key-size,omitempty" toml:"rsa-key-size,omitempty" json:"rsa-key-size,omitempty" reloadable:"true"`
+	AutoExpireDuration     string   `yaml:"autocert-expire-duration,omitempty" toml:"autocert-expire-duration,omitempty" json:"autocert-expire-duration,omitempty" reloadable:"true"`
+	SkipCA                 bool     `yaml:"skip-ca,omitempty" toml:"skip-ca,omitempty" json:"skip-ca,omitempty" reloadable:"true"`
+	ClientSessionCacheSize int      `yaml:"client-session-cache-size,omitempty" toml:"client-session-cache-size,omitempty" json:"client-session-cache-size,omitempty" reloadable:"true"`
 }
 
 func (c TLSConfig) HasCert() bool {

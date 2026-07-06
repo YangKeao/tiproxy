@@ -106,6 +106,7 @@ graceful-close-conn-timeout = 15
 #   1. requires: ca or skip-ca(skip verify server certs)
 #   2. optionally: cert/key will be used if server asks, i.e. server-side client verification
 #   3. useless/forbid: auto-certs
+#   4. optionally: client-session-cache-size enables TLS session resumption when greater than 0
 # server object:
 #   1. requires: cert/key or auto-certs(generate a temporary cert, mostly for testing)
 #   2. optionally: ca will enable server-side client verification. If skip-ca is true with non-empty ca, server will only verify clients if it can provide any cert. Otherwise, clients must provide a cert.
@@ -119,6 +120,7 @@ graceful-close-conn-timeout = 15
 	[security.sql-tls]
 	# access to TiDB SQL(4000) port will use this
 	skip-ca = true
+	# client-session-cache-size = 64
 
 	# server object
 	[security.server-tls]

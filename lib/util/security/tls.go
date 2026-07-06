@@ -207,10 +207,12 @@ func BuildClientTLSConfig(logger *zap.Logger, cfg config.TLSConfig) (*tls.Config
 	if !cfg.HasCA() {
 		if cfg.SkipCA {
 			// still enable TLS without verify server certs
-			return &tls.Config{
+			tcfg := &tls.Config{
 				InsecureSkipVerify: true,
 				MinVersion:         tls.VersionTLS11,
-			}, nil
+			}
+			setClientSessionCache(tcfg, cfg.ClientSessionCacheSize)
+			return tcfg, nil
 		}
 		logger.Info("no CA to verify server connections, disable TLS")
 		return nil, nil
@@ -219,6 +221,7 @@ func BuildClientTLSConfig(logger *zap.Logger, cfg config.TLSConfig) (*tls.Config
 	tcfg := &tls.Config{
 		MinVersion: tls.VersionTLS11,
 	}
+	setClientSessionCache(tcfg, cfg.ClientSessionCacheSize)
 	tcfg.RootCAs = x509.NewCertPool()
 	certBytes, err := os.ReadFile(cfg.CA)
 	if err != nil {
@@ -239,6 +242,12 @@ func BuildClientTLSConfig(logger *zap.Logger, cfg config.TLSConfig) (*tls.Config
 	tcfg.Certificates = append(tcfg.Certificates, cert)
 
 	return tcfg, nil
+}
+
+func setClientSessionCache(tcfg *tls.Config, size int) {
+	if size > 0 {
+		tcfg.ClientSessionCache = tls.NewLRUClientSessionCache(size)
+	}
 }
 
 // GetMinTLSVer parses the min tls version from config and reports warning if necessary.
