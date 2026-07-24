@@ -44,7 +44,7 @@ func (cp *CmdProcessor) query(packetIO pnet.PacketIO, sql string) (result *mysql
 
 // readResultSet is only used for reading the results of `show session_states` currently.
 func (cp *CmdProcessor) readResultSet(packetIO pnet.PacketIO, data []byte) (*mysql.Result, error) {
-	columnCount, _, n := pnet.ParseLengthEncodedInt(data)
+	columnCount, _, n, _ := pnet.ParseLengthEncodedInt(data)
 	if n-len(data) != 0 {
 		return nil, errors.WithStack(mysql.ErrMalformPacket)
 	}

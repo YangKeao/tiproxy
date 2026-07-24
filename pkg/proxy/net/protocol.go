@@ -31,7 +31,11 @@ import (
 	"io"
 )
 
-func ParseLengthEncodedInt(b []byte) (num uint64, isNull bool, n int) {
+func ParseLengthEncodedInt(b []byte) (num uint64, isNull bool, n int, err error) {
+	if len(b) == 0 {
+		return 0, false, 1, io.EOF
+	}
+
 	switch b[0] {
 	// 251: NULL
 	case 0xfb:
@@ -41,18 +45,27 @@ func ParseLengthEncodedInt(b []byte) (num uint64, isNull bool, n int) {
 
 	// 252: value of following 2
 	case 0xfc:
+		if len(b) < 3 {
+			return 0, false, 3, io.EOF
+		}
 		num = uint64(b[1]) | uint64(b[2])<<8
 		n = 3
 		return
 
 	// 253: value of following 3
 	case 0xfd:
+		if len(b) < 4 {
+			return 0, false, 4, io.EOF
+		}
 		num = uint64(b[1]) | uint64(b[2])<<8 | uint64(b[3])<<16
 		n = 4
 		return
 
 	// 254: value of following 8
 	case 0xfe:
+		if len(b) < 9 {
+			return 0, false, 9, io.EOF
+		}
 		num = uint64(b[1]) | uint64(b[2])<<8 | uint64(b[3])<<16 |
 			uint64(b[4])<<24 | uint64(b[5])<<32 | uint64(b[6])<<40 |
 			uint64(b[7])<<48 | uint64(b[8])<<56
@@ -85,16 +98,18 @@ func SkipLengthEncodedInt(b []byte) int {
 
 func ParseLengthEncodedBytes(b []byte) ([]byte, bool, int, error) {
 	// Get length
-	num, isNull, n := ParseLengthEncodedInt(b)
+	num, isNull, n, err := ParseLengthEncodedInt(b)
+	if err != nil {
+		return nil, false, n, err
+	}
 	if num < 1 {
 		return nil, isNull, n, nil
 	}
 
-	n += int(num)
-
 	// Check data length
-	if len(b) >= n {
-		return b[n-int(num) : n], false, n, nil
+	if num <= uint64(len(b)-n) {
+		end := n + int(num)
+		return b[n:end], false, end, nil
 	}
 
 	return nil, false, n, io.EOF

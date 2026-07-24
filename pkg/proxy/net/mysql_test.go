@@ -31,6 +31,46 @@ func TestHandshakeResp(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestMalformedHandshakeResp(t *testing.T) {
+	_, err := ParseHandshakeResponse(make([]byte, 32))
+	require.ErrorIs(t, err, mysql.ErrMalformPacket)
+}
+
+func TestParseLengthEncodedIntMalformed(t *testing.T) {
+	testCases := [][]byte{
+		{},
+		{0xfc},
+		{0xfc, 1},
+		{0xfd},
+		{0xfd, 1, 2},
+		{0xfe},
+		{0xfe, 1, 2, 3, 4, 5, 6, 7},
+	}
+	for _, data := range testCases {
+		_, _, _, err := ParseLengthEncodedInt(data)
+		require.Error(t, err, "data: %v", data)
+	}
+}
+
+func FuzzClientHandshakePacketParsers(f *testing.F) {
+	f.Add([]byte{})
+	f.Add(make([]byte, 32))
+	f.Add(MakeHandshakeResponse(&HandshakeResp{
+		Attrs:      map[string]string{"key": "value"},
+		User:       "user",
+		DB:         "db",
+		AuthPlugin: "mysql_native_password",
+		AuthData:   []byte("auth"),
+		Capability: ClientSecureConnection | ClientConnectWithDB | ClientPluginAuth | ClientConnectAttrs,
+	}))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_, _ = ParseHandshakeResponse(data)
+		_, _, _, _ = ParseLengthEncodedInt(data)
+		_, _, _, _ = ParseLengthEncodedBytes(data)
+	})
+}
+
 func TestChangeUserReq(t *testing.T) {
 	req1 := &ChangeUserReq{
 		Attrs:      map[string]string{"key": "value"},

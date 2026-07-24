@@ -127,12 +127,18 @@ func (auth *Authenticator) handshakeFirstTime(ctx context.Context, logger *zap.L
 	isSSL := pnet.ParseSSLRequestOrHandshakeResp(pkt)
 	frontendCapability := pnet.Capability(binary.LittleEndian.Uint32(pkt))
 	if isSSL {
+		if frontendTLSConfig == nil {
+			return errors.Wrap(ErrClientHandshake, ErrProxyNoTLS)
+		}
 		if _, err = clientIO.ServerTLSHandshake(frontendTLSConfig); err != nil {
 			return errors.Wrap(ErrClientHandshake, err)
 		}
 		pkt, err = readClientHandshakePacket(clientIO)
 		if err != nil {
 			return err
+		}
+		if len(pkt) < 4 {
+			return errors.Wrap(ErrClientHandshake, mysql.ErrMalformPacket)
 		}
 		frontendCapabilityResponse := pnet.Capability(binary.LittleEndian.Uint32(pkt))
 		if frontendCapability != frontendCapabilityResponse {
@@ -169,7 +175,7 @@ func (auth *Authenticator) handshakeFirstTime(ctx context.Context, logger *zap.L
 	if errors.As(err, &warning) {
 		logger.Warn("parse handshake response encounters error", zap.Error(err))
 	} else if err != nil {
-		return err
+		return errors.Wrap(err, ErrClientHandshake)
 	}
 	if err = handshakeHandler.HandleHandshakeResp(cctx, clientResp); err != nil {
 		return errors.Wrap(err, ErrProxyErr)

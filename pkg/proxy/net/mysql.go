@@ -186,85 +186,173 @@ type HandshakeResp struct {
 	Collation  uint8
 }
 
+type mysqlPacketParser struct {
+	data []byte
+	pos  int
+}
+
+func (p *mysqlPacketParser) remaining() int {
+	return len(p.data) - p.pos
+}
+
+func (p *mysqlPacketParser) read(size int) ([]byte, bool) {
+	if size < 0 || size > p.remaining() {
+		return nil, false
+	}
+	data := p.data[p.pos : p.pos+size]
+	p.pos += size
+	return data, true
+}
+
+func (p *mysqlPacketParser) readLength(size uint64) ([]byte, bool) {
+	if size > uint64(p.remaining()) {
+		return nil, false
+	}
+	return p.read(int(size))
+}
+
+func (p *mysqlPacketParser) readByte() (byte, bool) {
+	data, ok := p.read(1)
+	if !ok {
+		return 0, false
+	}
+	return data[0], true
+}
+
+func (p *mysqlPacketParser) readNullTerminatedString() ([]byte, bool) {
+	idx := bytes.IndexByte(p.data[p.pos:], 0)
+	if idx < 0 {
+		return nil, false
+	}
+	data, _ := p.read(idx + 1)
+	return data[:idx], true
+}
+
+func (p *mysqlPacketParser) readLengthEncodedInt() (uint64, bool, bool) {
+	num, isNull, size, err := ParseLengthEncodedInt(p.data[p.pos:])
+	if err != nil {
+		return 0, false, false
+	}
+	p.pos += size
+	return num, isNull, true
+}
+
+func malformedPacket(field string) error {
+	return errors.Wrapf(gomysql.ErrMalformPacket, "invalid %s", field)
+}
+
 func ParseHandshakeResponse(data []byte) (*HandshakeResp, error) {
 	resp := new(HandshakeResp)
-	pos := 0
+	parser := mysqlPacketParser{data: data}
+
 	// capability
-	resp.Capability = Capability(binary.LittleEndian.Uint32(data[:4]))
-	pos += 4
+	capability, ok := parser.read(4)
+	if !ok {
+		return resp, malformedPacket("handshake response capability")
+	}
+	resp.Capability = Capability(binary.LittleEndian.Uint32(capability))
 	// skip max packet size
-	pos += 4
+	if _, ok = parser.read(4); !ok {
+		return resp, malformedPacket("handshake response max packet size")
+	}
 	// charset
-	resp.Collation = data[pos]
-	pos++
+	if resp.Collation, ok = parser.readByte(); !ok {
+		return resp, malformedPacket("handshake response charset")
+	}
 	// skip reserved 23[00]
-	pos += 23
+	if _, ok = parser.read(23); !ok {
+		return resp, malformedPacket("handshake response reserved bytes")
+	}
 
 	// user name
-	resp.User = string(data[pos : pos+bytes.IndexByte(data[pos:], 0)])
-	pos += len(resp.User) + 1
+	user, ok := parser.readNullTerminatedString()
+	if !ok {
+		return resp, malformedPacket("handshake response user name")
+	}
+	resp.User = string(user)
 
 	// password
 	if resp.Capability&ClientPluginAuthLenencClientData > 0 {
-		if data[pos] == 0x1 { // No auth data
-			pos += 2
+		firstByte, ok := parser.readByte()
+		if !ok {
+			return resp, malformedPacket("handshake response auth data length")
+		}
+		parser.pos--
+		if firstByte == 0x1 { // No auth data
+			if _, ok = parser.read(2); !ok {
+				return resp, malformedPacket("handshake response auth data")
+			}
 		} else {
-			num, null, off := ParseLengthEncodedInt(data[pos:])
-			pos += off
+			num, null, ok := parser.readLengthEncodedInt()
+			if !ok {
+				return resp, malformedPacket("handshake response auth data length")
+			}
 			if !null {
-				resp.AuthData = data[pos : pos+int(num)]
-				pos += int(num)
+				if resp.AuthData, ok = parser.readLength(num); !ok {
+					return resp, malformedPacket("handshake response auth data")
+				}
 			}
 		}
 	} else if resp.Capability&ClientSecureConnection > 0 {
-		authLen := int(data[pos])
-		pos++
-		resp.AuthData = data[pos : pos+authLen]
-		pos += authLen
+		authLen, ok := parser.readByte()
+		if !ok {
+			return resp, malformedPacket("handshake response auth data length")
+		}
+		if resp.AuthData, ok = parser.read(int(authLen)); !ok {
+			return resp, malformedPacket("handshake response auth data")
+		}
 	} else {
-		resp.AuthData = data[pos : pos+bytes.IndexByte(data[pos:], 0)]
-		pos += len(resp.AuthData) + 1
+		if resp.AuthData, ok = parser.readNullTerminatedString(); !ok {
+			return resp, malformedPacket("handshake response auth data")
+		}
 	}
 
 	// dbname
 	if resp.Capability&ClientConnectWithDB > 0 {
-		if len(data[pos:]) > 0 {
-			idx := bytes.IndexByte(data[pos:], 0)
-			resp.DB = string(data[pos : pos+idx])
-			pos = pos + idx + 1
+		db, ok := parser.readNullTerminatedString()
+		if !ok {
+			return resp, malformedPacket("handshake response database")
 		}
+		resp.DB = string(db)
 	}
 
 	// auth plugin
 	if resp.Capability&ClientPluginAuth > 0 {
-		idx := bytes.IndexByte(data[pos:], 0)
-		s := pos
-		f := pos + idx
-		if s < f { // handle unexpected bad packets
-			resp.AuthPlugin = string(data[s:f])
+		authPlugin, ok := parser.readNullTerminatedString()
+		if !ok {
+			return resp, malformedPacket("handshake response auth plugin")
 		}
-		pos += idx + 1
+		resp.AuthPlugin = string(authPlugin)
 	}
 
 	// attrs
 	var err error
 	if resp.Capability&ClientConnectAttrs > 0 {
-		if num, null, off := ParseLengthEncodedInt(data[pos:]); !null {
-			pos += off
-			row := data[pos : pos+int(num)]
+		num, null, ok := parser.readLengthEncodedInt()
+		if !ok {
+			return resp, malformedPacket("handshake response attributes length")
+		}
+		if !null {
+			row, ok := parser.readLength(num)
+			if !ok {
+				return resp, malformedPacket("handshake response attributes")
+			}
 			resp.Attrs, err = parseAttrs(row)
 			// Some clients have known bugs, but we should be compatible with them.
 			// E.g. https://bugs.mysql.com/bug.php?id=79612.
 			if err != nil {
 				err = &errors.Warning{Err: errors.Wrapf(err, "parse attrs failed")}
 			}
-			pos += int(num)
 		}
 	}
 
 	// zstd compress level
 	if resp.Capability&ClientZstdCompressionAlgorithm > 0 {
-		resp.ZstdLevel = int(data[pos])
+		zstdLevel, ok := parser.readByte()
+		if !ok {
+			return resp, malformedPacket("handshake response zstd compression level")
+		}
+		resp.ZstdLevel = int(zstdLevel)
 	}
 	return resp, err
 }
@@ -465,7 +553,11 @@ func ParseChangeUser(data []byte, capability Capability) (*ChangeUserReq, error)
 	// attrs
 	var err error
 	if capability&ClientConnectAttrs > 0 {
-		if num, null, off := ParseLengthEncodedInt(data[pos:]); !null {
+		num, null, off, parseErr := ParseLengthEncodedInt(data[pos:])
+		if parseErr != nil {
+			return req, parseErr
+		}
+		if !null {
 			pos += off
 			row := data[pos : pos+int(num)]
 			req.Attrs, err = parseAttrs(row)
