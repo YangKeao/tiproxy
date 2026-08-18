@@ -300,6 +300,7 @@ type replay struct {
 	decodeCtx           context.Context
 	decodeCancel        context.CancelFunc
 	wg                  waitgroup.WaitGroup
+	dynamicReaders      []cmd.LineReader
 	cancel              context.CancelFunc
 	connCreator         conn.ConnCreator
 	report              report.Report
@@ -344,6 +345,7 @@ func (r *replay) Start(cfg ReplayConfig, backendTLSConfig *tls.Config, hsHandler
 	defer r.Unlock()
 	r.cfg = cfg
 	r.storages = storages
+	r.dynamicReaders = nil
 	r.meta = *r.readMeta()
 	r.startTime = cfg.StartTime
 	r.endTime = time.Time{}
@@ -742,8 +744,10 @@ func (r *replay) constructDynamicDecoder(ctx context.Context) (decoder, error) {
 		}
 		newDecoder, err := r.constructDecoderForReader(ctx, reader, len(r.storages)-1)
 		if err != nil {
+			reader.Close()
 			return err
 		}
+		r.dynamicReaders = append(r.dynamicReaders, reader)
 
 		decoder.AddDecoder(newDecoder)
 		return nil
@@ -1026,6 +1030,10 @@ func (r *replay) stop(err error) {
 		r.report.Close()
 		r.report = nil
 	}
+	for _, reader := range r.dynamicReaders {
+		reader.Close()
+	}
+	r.dynamicReaders = nil
 	r.endTime = time.Now()
 	// decodedCmds - pendingCmds may be greater than replayedCmds because if a connection is closed unexpectedly,
 	// the pending commands of that connection are discarded. We calculate the progress based on decodedCmds - pendingCmds.

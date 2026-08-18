@@ -844,6 +844,111 @@ func TestDynamicInput(t *testing.T) {
 	require.ErrorIs(t, err, io.EOF)
 }
 
+func TestDynamicInputReplayerRecoversFailedDirectory(t *testing.T) {
+	tempDir := t.TempDir()
+	input := filepath.Join(tempDir, "tidb-")
+	badDir := filepath.Join(tempDir, "tidb-bad")
+	goodDir := filepath.Join(tempDir, "tidb-good")
+
+	require.NoError(t, os.MkdirAll(badDir, 0755))
+	require.NoError(t, os.MkdirAll(goodDir, 0755))
+
+	writeReplayAuditLog(t, badDir, "tidb-audit-2025-09-10T17-01-56.000.log", "2025/09/10 17:01:56.000 +08:00", "select 11", 1001)
+	writeReplayAuditLog(t, goodDir, "tidb-audit-2025-09-10T17-01-56.100.log", "2025/09/10 17:01:56.100 +08:00", "select 21", 2001)
+
+	dirWatcherInterval := 20 * time.Millisecond
+	store.SetDirWatcherPollIntervalForTest(dirWatcherInterval)
+	store.SetOpenFileRetryIntervalForTest(20 * time.Millisecond)
+	t.Cleanup(func() {
+		store.SetDirWatcherPollIntervalForTest(5 * time.Second)
+		store.SetOpenFileRetryIntervalForTest(5 * time.Second)
+		_ = os.Chmod(badDir, 0755)
+		_ = os.Chmod(goodDir, 0755)
+	})
+
+	lg, logs := logger.CreateLoggerForTest(t)
+	replay := NewReplay(lg, id.NewIDManager())
+	t.Cleanup(func() {
+		replay.Close()
+	})
+
+	cmdCh := make(chan *cmd.Command, 16)
+	cfg := ReplayConfig{
+		Input:           input,
+		Username:        "u1",
+		StartTime:       time.Now(),
+		Format:          cmd.FormatAuditLogPlugin,
+		DynamicInput:    true,
+		WaitOnEOF:       true,
+		ReplayerCount:   1,
+		ReplayerIndex:   0,
+		DryRun:          true,
+		PSCloseStrategy: cmd.PSCloseStrategyDirected,
+		connCreator: func(connID uint64, _ uint64) conn.Conn {
+			return &mockConn{
+				connID:  connID,
+				cmdCh:   cmdCh,
+				closeCh: replay.closeConnCh,
+				closed:  make(chan struct{}),
+			}
+		},
+	}
+	require.NoError(t, replay.Start(cfg, nil, nil, &backend.BCConfig{}))
+
+	require.Eventually(t, func() bool {
+		logOutput := logs.String()
+		return strings.Contains(logOutput, "start replay") &&
+			strings.Contains(logOutput, "dir watcher found new directory") &&
+			strings.Contains(logOutput, badDir) &&
+			strings.Contains(logOutput, goodDir)
+	}, 3*time.Second, 10*time.Millisecond)
+
+	seenSQLs := make(map[string]struct{})
+	drainCommands := func() {
+		for {
+			select {
+			case command := <-cmdCh:
+				if len(command.Payload) > 1 {
+					seenSQLs[string(command.Payload[1:])] = struct{}{}
+				}
+			default:
+				return
+			}
+		}
+	}
+
+	require.Eventually(t, func() bool {
+		drainCommands()
+		_, seenBadInitial := seenSQLs["select 11"]
+		_, seenGoodInitial := seenSQLs["select 21"]
+		return seenBadInitial && seenGoodInitial
+	}, 3*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, os.Chmod(badDir, 0))
+	require.Eventually(t, func() bool {
+		return strings.Contains(logs.String(), "open file loop failed")
+	}, 3*time.Second, 10*time.Millisecond)
+	require.NoError(t, os.Chmod(badDir, 0755))
+
+	writeReplayAuditLog(t, badDir, "tidb-audit-2025-09-10T17-01-57.000.log", "2025/09/10 17:01:57.000 +08:00", "select 12", 1001)
+	writeReplayAuditLog(t, goodDir, "tidb-audit-2025-09-10T17-01-57.100.log", "2025/09/10 17:01:57.100 +08:00", "select 22", 2001)
+
+	require.Eventually(t, func() bool {
+		drainCommands()
+		_, seenBadLater := seenSQLs["select 12"]
+		_, seenGoodLater := seenSQLs["select 22"]
+		return seenBadLater && seenGoodLater
+	}, 3*time.Second, 10*time.Millisecond)
+}
+
+func writeReplayAuditLog(t *testing.T, dir, filename, timestamp, sql string, connID uint64) {
+	t.Helper()
+
+	auditLog := fmt.Sprintf(`[2025/09/10 17:01:56.000 +08:00] [INFO] [logger.go:77] [ID=%d] [TIMESTAMP=%s] [EVENT_CLASS=GENERAL] [EVENT_SUBCLASS=] [STATUS_CODE=0] [COST_TIME=1057.834] [HOST=127.0.0.1] [CLIENT_IP=127.0.0.1] [USER=root] [DATABASES="[]"] [TABLES="[]"] [SQL_TEXT="%s"] [ROWS=0] [CONNECTION_ID=%d] [CLIENT_PORT=52611] [PID=89967] [COMMAND=Query] [SQL_STATEMENTS=Select] [EXECUTE_PARAMS="[]"] [CURRENT_DB=] [EVENT=COMPLETED]
+`, connID, timestamp, sql, connID)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, filename), []byte(auditLog), 0644))
+}
+
 func TestGetDirForInput(t *testing.T) {
 	tests := []struct {
 		input    string

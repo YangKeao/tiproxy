@@ -12,14 +12,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/request"
 	"github.com/aws/aws-sdk-go/service/s3"
 	backuppb "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/pingcap/tidb/br/pkg/mock"
+	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tiproxy/lib/util/logger"
 	"github.com/pingcap/tiproxy/pkg/sqlreplay/cmd"
 	"github.com/pingcap/tiproxy/pkg/util/waitgroup"
@@ -291,6 +294,45 @@ func TestWaitOnEOF(t *testing.T) {
 	require.Equal(t, fileName, <-fileCh)
 	require.NoError(t, l.Close())
 	wg.Wait()
+}
+
+func TestWaitOnEOFRetriesAfterWalkTimeout(t *testing.T) {
+	controller := gomock.NewController(t)
+	s3api := mock.NewMockS3API(controller)
+
+	oldRetryInterval := openFileRetryInterval
+	openFileRetryInterval = 10 * time.Millisecond
+	defer func() {
+		openFileRetryInterval = oldRetryInterval
+	}()
+
+	var listCalls int32
+	s3api.EXPECT().ListObjectsWithContext(gomock.Any(), gomock.Any()).MinTimes(2).DoAndReturn(
+		func(ctx context.Context, req *s3.ListObjectsInput, _ ...request.Option) (*s3.ListObjectsOutput, error) {
+			call := atomic.AddInt32(&listCalls, 1)
+			require.Equal(t, "bucket", *req.Bucket)
+			require.Equal(t, "prefix/tidb-audit-", *req.Prefix)
+			if call == 1 {
+				return nil, awserr.New(request.CanceledErrorCode, "request context canceled", context.DeadlineExceeded)
+			}
+			return &s3.ListObjectsOutput{}, nil
+		},
+	)
+
+	storage := storage.NewS3StorageForTest(s3api, &backuppb.S3{
+		Bucket: "bucket",
+		Prefix: "prefix/",
+	})
+	reader, err := newRotateReader(zap.NewNop(), storage, ReaderCfg{
+		Format:    cmd.FormatAuditLogPlugin,
+		WaitOnEOF: true,
+	})
+	require.NoError(t, err)
+	defer reader.Close()
+
+	require.Eventually(t, func() bool {
+		return atomic.LoadInt32(&listCalls) >= 2
+	}, time.Second, 10*time.Millisecond)
 }
 
 func TestReadGZip(t *testing.T) {

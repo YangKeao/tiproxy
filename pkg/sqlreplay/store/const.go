@@ -15,3 +15,5 @@ const (
 	bufferSize          = 1 << 20
 	opTimeout           = 10 * time.Second
 )
+
+var openFileRetryInterval = 5 * time.Second

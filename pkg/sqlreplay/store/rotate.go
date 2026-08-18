@@ -197,7 +197,7 @@ func newRotateReader(lg *zap.Logger, store storage.ExternalStorage, cfg ReaderCf
 	childCtx, cancel := context.WithCancel(context.Background())
 	r.cancel = cancel
 	r.wg.Run(func() {
-		if err := r.openFileLoop(childCtx); err != nil && !errors.Is(err, io.EOF) {
+		if err := r.openFileLoop(childCtx); err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) {
 			r.lg.Error("open file loop failed", zap.Error(err))
 		}
 	}, lg)
@@ -296,7 +296,16 @@ func (r *rotateReader) openFileLoop(ctx context.Context) error {
 			})
 		cancel()
 		if err != nil {
-			break
+			if ctx.Err() != nil {
+				break
+			}
+			r.lg.Error("open file loop failed, retry later", zap.Error(err), zap.Duration("retry_interval", openFileRetryInterval))
+			if !waitForOpenFileRetry(ctx) {
+				err = ctx.Err()
+				break
+			}
+			err = nil
+			continue
 		}
 		if minFileName == "" {
 			if r.cfg.WaitOnEOF {
@@ -311,8 +320,17 @@ func (r *rotateReader) openFileLoop(ctx context.Context) error {
 		var fr storage.ExternalFileReader
 		fr, err = r.storage.Open(ctx, minFileName, &storage.ReaderOption{})
 		if err != nil {
+			if ctx.Err() != nil {
+				break
+			}
 			err = errors.WithStack(err)
-			break
+			r.lg.Error("open file loop failed, retry later", zap.Error(err), zap.Duration("retry_interval", openFileRetryInterval))
+			if !waitForOpenFileRetry(ctx) {
+				err = ctx.Err()
+				break
+			}
+			err = nil
+			continue
 		}
 		curFileTime = minFileTime
 		curFileName = minFileName
@@ -326,6 +344,25 @@ func (r *rotateReader) openFileLoop(ctx context.Context) error {
 	}
 	close(r.fileCh)
 	return err
+}
+
+func waitForOpenFileRetry(ctx context.Context) bool {
+	if openFileRetryInterval <= 0 {
+		return ctx.Err() == nil
+	}
+	timer := time.NewTimer(openFileRetryInterval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+// SetOpenFileRetryIntervalForTest sets the retry interval for rotateReader.
+func SetOpenFileRetryIntervalForTest(d time.Duration) {
+	openFileRetryInterval = d
 }
 
 func (r *rotateReader) nextReader() error {
