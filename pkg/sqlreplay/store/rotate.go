@@ -169,6 +169,8 @@ type fileReader struct {
 	reader   storage.ExternalFileReader
 }
 
+type walkFileFunc func(context.Context, string, func(string, int64) (bool, error)) error
+
 type rotateReader struct {
 	cfg          ReaderCfg
 	absolutePath string
@@ -262,6 +264,10 @@ func (r *rotateReader) closeFile() error {
 }
 
 func (r *rotateReader) openFileLoop(ctx context.Context) error {
+	return r.openFileLoopWithWalker(ctx, r.walkFile)
+}
+
+func (r *rotateReader) openFileLoopWithWalker(ctx context.Context, walkFile walkFileFunc) error {
 	var curFileTime time.Time
 	var curFileName string
 	var err error
@@ -271,7 +277,7 @@ func (r *rotateReader) openFileLoop(ctx context.Context) error {
 		fileNamePrefix := getFileNamePrefix(r.cfg.Format)
 		childCtx, cancel := context.WithTimeout(ctx, opTimeout)
 		startTime := time.Now()
-		err = r.walkFile(childCtx, curFileName,
+		err = walkFile(childCtx, curFileName,
 			func(name string, size int64) (bool, error) {
 				if !strings.HasPrefix(name, fileNamePrefix) {
 					return false, nil
@@ -296,11 +302,29 @@ func (r *rotateReader) openFileLoop(ctx context.Context) error {
 			})
 		cancel()
 		if err != nil {
-			break
+			if ctx.Err() != nil {
+				err = nil
+				break
+			}
+			if !r.cfg.WaitOnEOF {
+				break
+			}
+			r.lg.Warn("failed to list traffic files, retrying",
+				zap.String("dir", r.cfg.Dir),
+				zap.Duration("retry_after", readerRetryInterval),
+				zap.Error(err))
+			if !waitForContext(ctx, readerRetryInterval) {
+				err = nil
+				break
+			}
+			continue
 		}
 		if minFileName == "" {
 			if r.cfg.WaitOnEOF {
-				time.Sleep(10 * time.Millisecond)
+				if !waitForContext(ctx, readerPollInterval) {
+					err = nil
+					break
+				}
 				continue
 			} else {
 				err = io.EOF
@@ -326,6 +350,17 @@ func (r *rotateReader) openFileLoop(ctx context.Context) error {
 	}
 	close(r.fileCh)
 	return err
+}
+
+func waitForContext(ctx context.Context, duration time.Duration) bool {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func (r *rotateReader) nextReader() error {

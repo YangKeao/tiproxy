@@ -293,6 +293,66 @@ func TestWaitOnEOF(t *testing.T) {
 	wg.Wait()
 }
 
+func TestWaitOnEOFRecoversFromWalkError(t *testing.T) {
+	dir := t.TempDir()
+	storage, err := NewStorage(dir)
+	require.NoError(t, err)
+	defer storage.Close()
+
+	l := &rotateReader{
+		cfg: ReaderCfg{
+			Dir:       dir,
+			Format:    cmd.FormatAuditLogPlugin,
+			WaitOnEOF: true,
+		},
+		storage: storage,
+		lg:      zap.NewNop(),
+		fileCh:  make(chan fileReader, 1),
+	}
+	walkFailed := make(chan struct{})
+	firstAttempt := true
+	loopErr := startRotateReaderWithWalker(l, func(ctx context.Context, curFileName string, fn func(string, int64) (bool, error)) error {
+		if firstAttempt {
+			firstAttempt = false
+			close(walkFailed)
+			return context.DeadlineExceeded
+		}
+		return l.walkFile(ctx, curFileName, fn)
+	})
+
+	nextReaderErr := make(chan error, 1)
+	go func() {
+		nextReaderErr <- l.nextReader()
+	}()
+	select {
+	case <-walkFailed:
+	case <-time.After(time.Second):
+		t.Fatal("reader did not encounter the injected storage error")
+	}
+
+	fileName := "tidb-audit-2025-09-10T17-01-56.073.log"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, fileName), nil, 0666))
+	select {
+	case err := <-nextReaderErr:
+		require.NoError(t, err)
+		require.Equal(t, fileName, l.externalFile.fileName)
+	case <-time.After(3 * time.Second):
+		t.Fatal("reader did not recover after the storage error")
+	}
+	require.NoError(t, l.Close())
+	require.NoError(t, <-loopErr)
+}
+
+func startRotateReaderWithWalker(l *rotateReader, walkFile walkFileFunc) <-chan error {
+	ctx, cancel := context.WithCancel(context.Background())
+	l.cancel = cancel
+	loopErr := make(chan error, 1)
+	l.wg.Run(func() {
+		loopErr <- l.openFileLoopWithWalker(ctx, walkFile)
+	}, l.lg)
+	return loopErr
+}
+
 func TestReadGZip(t *testing.T) {
 	tmpDir := t.TempDir()
 	storage, err := NewStorage(tmpDir)
